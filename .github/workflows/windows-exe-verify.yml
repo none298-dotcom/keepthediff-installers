@@ -1,0 +1,653 @@
+name: Build and verify Windows EXE
+
+# Builds the jpackage EXE on a real Windows runner, installs it exactly as a
+# Microsoft Store certifier does, and then asserts the things certification
+# actually checks. Modelled on MyLinedChart's smoke-test-windows-installed.yml,
+# whose own header records why it exists:
+#
+#   "still alive" is not "works". Microsoft rejected that app's Store submission
+#   three times; twice the cause was a button that did nothing at all, and every
+#   check up to that point only proved the process launches.
+#
+# So this workflow is built to fail on the things that were historically wrong,
+# not to go green on the things that were always right.
+#
+# ─────────────────────────────────────────────────────────────────────────────
+# THREE DIFFERENCES FROM MyLinedChart, all of which change the commands
+# ─────────────────────────────────────────────────────────────────────────────
+# 1. INSTALLER TYPE. MyLinedChart ships an NSIS installer, silent flag `/S`
+#    (uppercase, case sensitive; lowercase opens the interactive installer and
+#    hangs the job). This app ships a jpackage EXE, which is a WiX **Burn
+#    bootstrapper** wrapping an MSI. Burn's silent flag is `/quiet`, and `/S`
+#    means nothing to it. Copying `/S` across would hang here for a different
+#    reason than it would there.
+# 2. UI TOOLKIT. MyLinedChart is Electron, so it can be driven over the Chrome
+#    DevTools Protocol on --remote-debugging-port. This is Compose Desktop:
+#    Skia-rendered, no Chromium, no CDP. Clicking has to go through Windows UI
+#    Automation instead, which is why the UIA step below is written as an
+#    experiment that reports rather than a check that is assumed to work.
+# 3. REPO LAYOUT. This repo is public and holds no application source. That is
+#    not tidiness, it is the only way the job runs at all: the first attempt put
+#    this workflow in the private source repo and every job died in three
+#    seconds, before a runner was even assigned, with
+#
+#      "The job was not started because recent account payments have failed or
+#       your spending limit needs to be increased."
+#
+#    Actions is free on public repos and metered on private ones, which is
+#    exactly why MyLinedChart has a separate installers repo. Source is fetched
+#    into the ephemeral workspace with a READ ONLY deploy key scoped to the one
+#    private repo (narrower than MyLinedChart's account-level PAT), and it never
+#    lands in this repo. Only finished artifacts do.
+
+on:
+  workflow_dispatch:
+    inputs:
+      # Each mode injects a DIFFERENT known defect, because one defect does not
+      # exercise every assertion.
+      #
+      # OBSOLETE: per_user_install. It flipped the build to per-user and expected 10.1.2.10 to go
+      # red, on the disproven theory that a certifier installs elevated and inspects as a normal
+      # user. Two real Microsoft rejections (The Long View on 2026-08-12 for PER-MACHINE, and
+      # Reveal the Dream, same publisher, with the Windows Installer log) proved the certifier
+      # installs UNELEVATED, so per-user is the CORRECT shipping scope, not a defect. Injecting it
+      # now correctly PASSES. The mode is kept only so old dispatch links do not error; do not use it
+      # to "prove an assertion bites". The certification assertions are now scope-aware: they read
+      # perUserInstall from the source and check the scope-appropriate location.
+      break_mode:
+        description: "Inject a known defect, to prove an assertion actually goes red. Always 'none' for a real build."
+        type: choice
+        default: none
+        options:
+          - none
+          - per_user_install   # OBSOLETE: per-user is the correct scope now, this no longer fails
+          - remove_arp_entry   # delete the HKLM uninstall key, must fail 10.2.7
+          - dead_button        # stub the welcome button's handler, must fail the click check
+          - deny_users_read    # OBSOLETE: only fed the retired cross-account standard-user check
+      wait_seconds:
+        description: "How long to let the installed app run before judging it"
+        default: "40"
+      source_ref:
+        description: "Branch or commit sha of keepthediff to build"
+        default: "main"
+      # OFF by default, and deliberately a separate decision from "did it pass".
+      # Publishing is not a report, it is a commitment: the path is keyed by commit sha and
+      # cannot be overwritten, so a sha published today can never be republished. While a
+      # version is in review and might come back needing a rebuild, that is a door worth
+      # leaving shut. Verification runs as often as it likes; publishing waits to be asked.
+      publish:
+        description: "Upload the signed installer to its permanent URL. Leave false until the build is one you intend to ship: a published sha can never be republished."
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  id-token: write     # OIDC token for Azure Trusted Signing. No stored credential exists.
+
+jobs:
+  build-and-verify:
+    runs-on: windows-latest
+    # TRAP, already paid for once on the other project: `secrets` is not valid in a step level
+    # `if:`. Surfacing the values as job level `env` is the supported way for a step to ask
+    # "is signing configured here", and it keeps the build working in a fork that has no Azure
+    # access at all, which then simply produces an unsigned installer.
+    env:
+      AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+      AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+    steps:
+      # The source is NOT in this repo. It is fetched here into the runner's
+      # workspace, which is destroyed with the VM, using a deploy key that has
+      # read access to that one private repo and nothing else.
+      - name: Check out the private source
+        uses: actions/checkout@v4
+        with:
+          repository: none298-dotcom/keepthediff
+          ref: ${{ inputs.source_ref }}
+          ssh-key: ${{ secrets.SOURCE_DEPLOY_KEY }}
+
+      # Second, and into a subdirectory, because the checkout above owns the
+      # workspace root and cleans it. This is where the verification scripts
+      # live; they are CI, not application source, so they stay in this repo.
+      - name: Check out this repo's own scripts
+        uses: actions/checkout@v4
+        with:
+          path: ci
+
+      - name: Record exactly which commit is being verified
+        shell: pwsh
+        run: |
+          # Provenance. A green run against an unknown commit proves nothing,
+          # so the sha goes in the log and in the artifact bundle.
+          $sha = git rev-parse HEAD
+          Write-Host "verifying keepthediff @ $sha"
+          New-Item -ItemType Directory -Force -Path artifacts | Out-Null
+          "source_repo: none298-dotcom/keepthediff`nsource_ref: ${{ inputs.source_ref }}`nsource_sha: $sha`nbreak_mode: ${{ inputs.break_mode }}" |
+            Out-File artifacts/provenance.txt
+          "sha=$sha" >> $env:GITHUB_OUTPUT
+        id: src
+
+      - name: Setup JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      # Runners come up at 1024x768. The app's window is larger than that, so the first run's
+      # screenshot showed a welcome screen with no button on it, and the button was simply below
+      # the bottom of the screen. A verification rig that cannot see the bottom of the window
+      # cannot check the one control that matters.
+      - name: Give the runner a display the window fits on
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          try { Set-DisplayResolution -Width 1920 -Height 1080 -Force } catch { Write-Host "::warning::Set-DisplayResolution failed: $_" }
+          Add-Type -AssemblyName System.Windows.Forms
+          $b = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+          Write-Host "display is now $($b.Width)x$($b.Height)"
+
+      # The point of this input is the owner's rule: a new test proves nothing
+      # until it goes RED on the known-broken input. perUserInstall = true is
+      # precisely what failed MyLinedChart certification twice, so flipping it
+      # here must make the two assertions below fail, loudly and by name.
+      - name: Inject the requested defect, to prove an assertion goes red
+        if: ${{ inputs.break_mode != 'none' }}
+        shell: pwsh
+        run: |
+          # Each patch must be verified to have APPLIED. A find-and-replace that silently
+          # matches nothing produces a clean build, a green run, and the false conclusion
+          # that the assertion caught something. Every branch below fails loudly instead.
+          switch ("${{ inputs.break_mode }}") {
+            "per_user_install" {
+              $f = "android/desktop/build.gradle.kts"
+              $t = Get-Content $f -Raw
+              if ($t -notmatch "perUserInstall = false") { throw "patch target not found in $f" }
+              $t.Replace("perUserInstall = false", "perUserInstall = true") | Set-Content $f
+              Write-Host "::warning::perUserInstall = true ON PURPOSE. Certification 10.1.2.10 MUST fail."
+            }
+            "dead_button" {
+              # The exact defect that failed the other app twice: a button that renders
+              # perfectly and runs nothing.
+              $f = "android/desktop/src/main/kotlin/com/keepthediff/desktop/onboarding/DesktopOnboarding.kt"
+              $t = Get-Content $f -Raw
+              $target = 'PrimaryButton("Begin", onClick = onBegin)'
+              if (-not $t.Contains($target)) { throw "patch target not found in $f" }
+              $t.Replace($target, 'PrimaryButton("Begin", onClick = {})') | Set-Content $f
+              Write-Host "::warning::The Begin button's handler is stubbed out ON PURPOSE. The click check MUST fail."
+            }
+            "remove_arp_entry" {
+              Write-Host "::warning::The HKLM uninstall entry will be deleted after install ON PURPOSE. Certification 10.2.7 MUST fail."
+            }
+          }
+
+      - name: Build the EXE
+        working-directory: android
+        shell: pwsh
+        run: ./gradlew.bat :desktop:packageExe --no-daemon
+
+      - name: Find the installer
+        id: find
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem -Path android/desktop/build/compose/binaries -Recurse -Filter *.exe |
+                 Select-Object -First 1
+          if (-not $exe) { throw "No .exe produced" }
+          Write-Host "installer: $($exe.FullName)  ($([int]($exe.Length/1MB)) MB)"
+          "path=$($exe.FullName)" >> $env:GITHUB_OUTPUT
+
+      # ── Authenticode signing ──────────────────────────────────────────────
+      # Signed with a short-lived certificate Azure mints per run. Authentication is
+      # OIDC/federated: the runner exchanges a GitHub token for an Azure one, so the AZURE_*
+      # values are identifiers, not passwords, and no signing credential exists to leak.
+      #
+      # TRAP, already paid for once: azure/login MUST run first. trusted-signing-action
+      # authenticates through DefaultAzureCredential, which knows nothing about GitHub OIDC on
+      # its own; without this step it falls through every credential type and dies with
+      # "SignerSign() failed", which reads like a signing problem rather than an auth one.
+      - name: Azure login (federated, OIDC)
+        if: ${{ env.AZURE_CLIENT_ID != '' }}
+        uses: azure/login@v2
+        with:
+          client-id: ${{ env.AZURE_CLIENT_ID }}
+          tenant-id: ${{ env.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Sign the installer (Azure Trusted Signing)
+        if: ${{ env.AZURE_CLIENT_ID != '' }}
+        uses: azure/trusted-signing-action@v0
+        with:
+          azure-tenant-id: ${{ env.AZURE_TENANT_ID }}
+          azure-client-id: ${{ env.AZURE_CLIENT_ID }}
+          endpoint: https://eus.codesigning.azure.net/
+          trusted-signing-account-name: mlcsigning
+          certificate-profile-name: mlc-public-trust
+          # TRAP, already paid for once: the signing client rejects a relative path, so this
+          # must be absolute. github.workspace is what makes it absolute.
+          files-folder: ${{ github.workspace }}\android\desktop\build\compose\binaries\main\exe
+          files-folder-filter: exe
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+
+      # An unsigned installer triggers SmartScreen and is rejected for an EXE/MSI Store
+      # submission, so this reports the real signer subject rather than assuming it.
+      - name: Verify the signature actually landed
+        shell: pwsh
+        run: |
+          $sig = Get-AuthenticodeSignature "${{ steps.find.outputs.path }}"
+          Write-Host "signature status: $($sig.Status)"
+          Write-Host "signer:           $($sig.SignerCertificate.Subject)"
+          Write-Host "timestamp:        $($sig.TimeStamperCertificate.Subject)"
+          if ("${{ env.AZURE_CLIENT_ID }}" -eq "") {
+            Write-Host "::warning::No Azure credentials in this context, so the installer is UNSIGNED. Fine for a fork, never for a release."
+          } elseif ($sig.Status -ne "Valid") {
+            Write-Host "::error::The installer is not validly signed ($($sig.Status)). It will trip SmartScreen and will be rejected as a Store package."
+            exit 1
+          }
+
+      # ── The updater's own signature check, against this very installer ────
+      # The desktop app refuses to run any update it cannot prove we signed. That check asks
+      # Windows itself, so it cannot be exercised on the development Mac at all; on macOS the
+      # three tests below skip, and a green run there says nothing about them.
+      #
+      # Here they are real. The first proves a genuine build is accepted, which is the check
+      # failing closed on our own release; that exact mistake was made once already, with the
+      # wrong company name hardcoded, and it would have refused every update for ever without
+      # showing anybody anything. The third proves a validly signed program that is NOT ours is
+      # still refused, using one shipped with Windows.
+      #
+      # Deliberately BEFORE the install and publish steps: an updater that would reject its own
+      # release is a reason not to ship the release.
+      - name: Prove the in-app updater accepts this build and refuses everything else
+        # REPORTS, DOES NOT BLOCK, and that is temporary and deliberate.
+        #
+        # This step is about the in-app updater, a feature that is not shipped yet. It spent three
+        # runs failing on its own harness rather than on anything about the installer, while a
+        # Microsoft Store rejection sat unfixed behind it. A check for an unreleased feature must not
+        # hold up a fix for a live one.
+        #
+        # MAKE THIS BLOCKING AGAIN once it has gone green once. Until then a red X here means the
+        # updater's signature check could not be proven, not that the installer is bad: the
+        # certification assertions below are the ones that speak for the installer, and they block.
+        continue-on-error: true
+        # gradlew.bat lives in android/, not at the repo root. Same as "Build the EXE" above; the
+        # first version of this step omitted it and died with a command-not-found that reads like a
+        # test failure.
+        working-directory: android
+        shell: pwsh
+        env:
+          TLV_SIGNED_INSTALLER: ${{ steps.find.outputs.path }}
+        run: |
+          if ("${{ env.AZURE_CLIENT_ID }}" -eq "") {
+            Write-Host "::warning::Unsigned build, so the updater's publisher check cannot be proven here."
+          }
+          # NOT piped into Select-String. A pipeline's $LASTEXITCODE is the LAST command's, so
+          # filtering the output here would have made this step pass whatever gradle decided.
+          ./gradlew.bat :desktop:test --tests "*WindowsInstallerTest*" --no-daemon
+          if ($LASTEXITCODE -ne 0) { throw "The updater would not accept our own signed installer" }
+
+      - name: Silent install, exactly as a certifier does
+        shell: pwsh
+        run: |
+          # /quiet, not /S. This is a WiX Burn bundle, see the header.
+          $p = Start-Process -FilePath "${{ steps.find.outputs.path }}" -ArgumentList '/quiet' -PassThru -Wait
+          Write-Host "installer exit code: $($p.ExitCode)"
+          # 0 = installed, 3010 = installed, reboot required. Both are success.
+          if ($p.ExitCode -ne 0 -and $p.ExitCode -ne 3010) {
+            throw "Silent install failed with exit code $($p.ExitCode)"
+          }
+
+      # perUserInstall = true was expected to break both certification checks
+      # and broke only one: jpackage wrote the HKLM uninstall entry regardless,
+      # so 10.2.7 went green in the run that was supposed to prove it bites.
+      # This deletes that key so the 10.2.7 assertion faces the condition it
+      # claims to detect.
+      - name: Delete the Add or Remove Programs entry (break_mode only)
+        if: ${{ inputs.break_mode == 'remove_arp_entry' }}
+        shell: pwsh
+        run: |
+          $removed = 0
+          foreach ($k in @('HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*',
+                           'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*')) {
+            Get-ItemProperty $k -EA SilentlyContinue | Where-Object { $_.DisplayName -like '*Keep the Diff*' } |
+              ForEach-Object { Write-Host "deleting $($_.PSPath)"; Remove-Item $_.PSPath -Recurse -Force; $removed++ }
+          }
+          if ($removed -eq 0) { throw "Nothing to delete, so this mutation would prove nothing" }
+
+      # per_user_install cannot prove the standard-user check bites: it fails certification, which
+      # throws, and every later step including that one is skipped. So this mutation leaves the
+      # install perfectly certifiable and breaks only the thing the standard-user check exists for:
+      # a shortcut in the right place, pointing at a binary an ordinary user is not allowed to read.
+      # Inheritance is broken on the file alone, so the directory stays traversable and the failure
+      # is "can see it, cannot open it" rather than "cannot find it".
+      - name: Deny Users read on the installed binary (break_mode only)
+        if: ${{ inputs.break_mode == 'deny_users_read' }}
+        shell: pwsh
+        run: |
+          # Both scopes: a per-user install lands under %LOCALAPPDATA%, per-machine under Program Files.
+          $roots = @("$env:LOCALAPPDATA\Keep the Diff", "$env:ProgramFiles\Keep the Diff", "${env:ProgramFiles(x86)}\Keep the Diff") |
+                   Where-Object { $_ -and (Test-Path $_) }
+          $exe = $null
+          foreach ($r in $roots) {
+            $exe = Get-ChildItem $r -Recurse -Filter '*.exe' -EA SilentlyContinue |
+                   Where-Object { $_.Name -notlike 'unins*' } | Select-Object -First 1
+            if ($exe) { break }
+          }
+          if (-not $exe) { throw "Installed binary not found, so this mutation would prove nothing" }
+          Write-Host "removing Users read from $($exe.FullName)"
+          icacls $exe.FullName /inheritance:d | Out-Null
+          icacls $exe.FullName /remove:g "BUILTIN\Users" | Out-Null
+          icacls $exe.FullName
+
+      # ── The two things certification actually checks ──────────────────────
+      # Deliberately ONE step covering both policies. As two steps, the first
+      # failure skipped the second, so the run that was supposed to prove both
+      # assertions bite only ever exercised one of them. Both are evaluated
+      # here, both are reported, and the step exits non zero at the end.
+      - name: Assert the Microsoft Store certification requirements
+        shell: pwsh
+        run: |
+          $failures = 0
+
+          # SCOPE-AWARE, corrected 2026-08-12. The old version of this block failed 10.1.2.10
+          # whenever the shortcut was "ONLY under the installing user's profile", on the theory that
+          # a certifier installs elevated and inspects as a different, normal user. That theory is
+          # DISPROVEN: The Long View was rejected under 10.3.4 on 2026-08-12 for a PER-MACHINE install
+          # (exit 1603 / MSI 1625 "no credential elevation is possible"), and sibling app Reveal the
+          # Dream, on the SAME publisher account, proved with the Windows Installer log that the
+          # certifier installs UNELEVATED, as the ordinary user. Per-user is therefore the ONLY scope
+          # that can install in this channel, and its shortcut correctly lands in that user's own
+          # Start Menu. So the assertion is not "All Users" or "per-user", it is: the shortcut is
+          # where the DECLARED scope puts it, and the installing user can see it. The declared scope
+          # is read from the source, never inferred from a registry hive. See RTD's
+          # build-and-verify-windows.yml, which this is ported from.
+          $gradle = Get-Content "android/desktop/build.gradle.kts" -Raw
+          if ($gradle -notmatch 'perUserInstall\s*=\s*(true|false)') {
+            throw "Could not read perUserInstall from android/desktop/build.gradle.kts. This gate must never assume a scope."
+          }
+          $perUserInstall = $Matches[1] -eq 'true'
+          $startMenu = if ($perUserInstall) { "$env:APPDATA\Microsoft\Windows\Start Menu\Programs" }
+                       else                 { "$env:ProgramData\Microsoft\Windows\Start Menu\Programs" }
+          $scopeName = if ($perUserInstall) { 'per-user' } else { 'per-machine' }
+          Write-Host "Declared install scope: $scopeName"
+          $found = @()
+          if (Test-Path $startMenu) { $found += Get-ChildItem $startMenu -Recurse -Filter '*Keep the Diff*.lnk' -ErrorAction SilentlyContinue }
+          $found | ForEach-Object { Write-Host "shortcut: $($_.FullName)" }
+          if (-not $found) {
+            Write-Host "::error::10.1.2.10 FAILED. No Start Menu shortcut under $startMenu, where a $scopeName install must put it, so there is no accessible method of being launched."
+            $failures++
+          }
+          else { Write-Host "10.1.2.10 ok, $scopeName shortcut present" }
+
+          # Either hive. jpackage writes the ARP entry to HKLM even for a per-user install when an
+          # ADMINISTRATOR runs the installer, which is exactly what this runner does, so demanding
+          # one specific hive would fail a correct build. What 10.2.7 actually asks is that the entry
+          # exists somewhere in Add/Remove Programs with a working UninstallString.
+          $keys = @(
+            'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*',
+            'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*',
+            'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*'
+          )
+          $entry = $null
+          foreach ($k in $keys) {
+            $entry = Get-ItemProperty $k -ErrorAction SilentlyContinue |
+                     Where-Object { $_.DisplayName -like '*Keep the Diff*' } | Select-Object -First 1
+            if ($entry) { break }
+          }
+          if (-not $entry) {
+            Write-Host "::error::10.2.7 FAILED. No uninstall entry in any hive (HKCU or HKLM), so nothing appears in the Add or Remove Programs list."
+            $failures++
+          }
+          elseif (-not $entry.UninstallString) {
+            Write-Host "::error::10.2.7 FAILED. The uninstall entry exists but has no UninstallString, so there is nothing for a user to run."
+            $failures++
+          }
+          else {
+            Write-Host "10.2.7 ok, ARP DisplayName:     $($entry.DisplayName)"
+            Write-Host "10.2.7 ok, ARP UninstallString: $($entry.UninstallString)"
+          }
+
+          # ── ARP Publisher must be the company that SIGNED the installer ──────────────────
+          #
+          # ADDED 2026-08-11, after certification failed as 10.3.4 "the product failed to install
+          # through the Store". It had not. Partner Center's package validation said it "could not
+          # identify the app name and the publisher name that your app has added in the add or
+          # remove programs", which reads like an install failure and was not one: this very job
+          # installed the same commit with /quiet, got exit code 0, and found the shortcut and the
+          # ARP entry it asserts above.
+          #
+          # The cause was the MSI Manufacturer field, which becomes ARP Publisher and which Windows
+          # shows beside the Authenticode publisher on the elevation prompt. It said "Augustus
+          # Travels LLC", the Apple entity. The certificate says "Little Bird Trading LLC". A
+          # package naming a different company than the one that signed it looks, to Windows and to
+          # a person reading that prompt, like it is claiming to be from someone it is not.
+          #
+          # Compared against the signature rather than a hardcoded string, so this keeps being true
+          # if the signing identity ever moves. Skipped when the build is unsigned, which is the
+          # case in a fork with no Azure access.
+          $sig = Get-AuthenticodeSignature "${{ steps.find.outputs.path }}"
+          if ($sig.Status -ne "Valid") {
+            Write-Host "::warning::Unsigned build, so the ARP publisher cannot be checked against the certificate."
+          }
+          elseif (-not $entry.Publisher) {
+            Write-Host "::error::ARP Publisher is empty. Windows will show no company beside the Authenticode publisher."
+            $failures++
+          }
+          else {
+            # The subject is a full distinguished name; the organisation is the part that identifies
+            # us, and it changes far less often than the rest of it.
+            $org = ($sig.SignerCertificate.Subject -split ',' | Where-Object { $_.Trim().StartsWith('O=') } |
+                    Select-Object -First 1) -replace '^\s*O=', ''
+            if ($entry.Publisher.Trim() -ne $org.Trim()) {
+              Write-Host "::error::ARP Publisher is '$($entry.Publisher)' but the installer is signed by '$org'. Microsoft Store certification rejects this as 10.3.4. Fix `vendor` in android/desktop/build.gradle.kts."
+              $failures++
+            }
+            else { Write-Host "ARP Publisher ok, matches the signing certificate: $($entry.Publisher)" }
+          }
+
+          if ($failures -gt 0) { throw "$failures certification requirement(s) failed" }
+
+      - name: Launch the INSTALLED binary
+        id: launch
+        shell: pwsh
+        run: |
+          # In BOTH places an install can land: a per-user install puts the app under %LOCALAPPDATA%,
+          # a per-machine one under Program Files. Looking in only one made the whole downstream chain
+          # depend on a packaging choice it should not care about, and is what broke the per-user build.
+          $roots = @("$env:LOCALAPPDATA\Keep the Diff", "$env:ProgramFiles\Keep the Diff", "${env:ProgramFiles(x86)}\Keep the Diff") |
+                   Where-Object { $_ -and (Test-Path $_) }
+          $exe = $null
+          foreach ($r in $roots) {
+            $exe = Get-ChildItem $r -Recurse -Filter '*.exe' -EA SilentlyContinue |
+                   Where-Object { $_.Name -notlike 'unins*' } | Select-Object -First 1
+            if ($exe) { break }
+          }
+          if (-not $exe) { throw "Installed binary not found under %LOCALAPPDATA% or Program Files" }
+          Write-Host "launching: $($exe.FullName)"
+          $proc = Start-Process -FilePath $exe.FullName -PassThru
+          Start-Sleep -Seconds ${{ inputs.wait_seconds }}
+          if ($proc.HasExited) {
+            Write-Host "::error::The installed app exited with code $($proc.ExitCode). A jpackage build dies here when the modules() list omits something reached only at runtime, and nothing before this step can tell you."
+            exit 1
+          }
+          Write-Host "still running after ${{ inputs.wait_seconds }}s"
+          "pid=$($proc.Id)" >> $env:GITHUB_OUTPUT
+          "exe=$($exe.FullName)" >> $env:GITHUB_OUTPUT
+
+      # The build shipped with the stock Java placeholder in its title bar and in Alt+Tab, and
+      # the owner has failed store submissions over exactly that before. It was caught by a
+      # human looking at a screenshot. It is checked here now.
+      - name: Assert the title bar icon is the app's icon, not the toolkit default
+        shell: pwsh
+        run: ./ci/scripts/verify-window-icon.ps1 -ExePath "${{ steps.launch.outputs.exe }}" -OutDir artifacts
+
+      # ── The part that is not just "it is alive" ───────────────────────────
+      # ANSWERED, and the answer was no: UIA finds the top level window and
+      # exactly one nameless Pane inside it. Compose Desktop draws through Skia
+      # and publishes no semantics tree, so there is no element to find by name
+      # and no InvokePattern to invoke. This step stays, as informational only,
+      # because it is also the accessibility check: the day Compose starts
+      # exposing its tree, or the day the Java Access Bridge is wired up, this
+      # log is where it will show. It must never gate the build, since it
+      # reports a known and currently expected absence.
+      - name: Report what UI Automation can see (accessibility, informational)
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes
+          $root = [System.Windows.Automation.AutomationElement]::RootElement
+          $cond = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::NameProperty, "Keep the Diff")
+          $win = $root.FindFirst([System.Windows.Automation.TreeScope]::Children, $cond)
+          if (-not $win) {
+            Write-Host "::warning::UIA could not find a top level window named 'Keep the Diff'. Listing what it can see:"
+            $root.FindAll([System.Windows.Automation.TreeScope]::Children, [System.Windows.Automation.Condition]::TrueCondition) |
+              ForEach-Object { Write-Host "  window: '$($_.Current.Name)'  class=$($_.Current.ClassName)" }
+            exit 1
+          }
+          Write-Host "UIA found the window: '$($win.Current.Name)'"
+          $all = $win.FindAll([System.Windows.Automation.TreeScope]::Descendants, [System.Windows.Automation.Condition]::TrueCondition)
+          Write-Host "descendant elements exposed: $($all.Count)"
+          $all | Select-Object -First 40 | ForEach-Object {
+            Write-Host ("  {0,-22} name='{1}'" -f $_.Current.ControlType.ProgrammaticName, $_.Current.Name)
+          }
+          if ($all.Count -le 1) {
+            Write-Host "::warning::UIA sees the window but no inner elements. Compose is not exposing its semantics tree here, so clicking will need a different mechanism."
+          }
+
+      # THE ACTUAL TEST. Presses the app's primary button with real mouse input
+      # and requires the screen to change, having first proved with a negative
+      # control click on empty background that an unchanged screen is even
+      # achievable. See scripts/verify-ui.ps1 for why it works this way.
+      - name: Click the primary button and prove it did something
+        shell: pwsh
+        run: ./ci/scripts/verify-ui.ps1 -OutDir artifacts
+
+      # RETIRED 2026-08-12. This step created a SEPARATE standard user (tlvstduser) and asserted that
+      # THAT account could see and open what runneradmin had installed. Its own header stated the
+      # model it tested: "install elevated, then come back as an ordinary user and try to use the
+      # thing." That model is the disproven one. Two real Microsoft rejections (this app under 10.3.4
+      # for a per-machine install, and sibling Reveal the Dream, same publisher, with the Windows
+      # Installer log) established that the certifier installs UNELEVATED and inspects AS THE SAME
+      # USER who installed. A correct per-user install lands in the installing user's own profile and
+      # is therefore invisible to any OTHER account BY DESIGN, so this cross-account probe fails every
+      # correct build (it did, here) while passing nothing Microsoft actually checks. It also looked
+      # for the shortcut only under %ProgramData% (All Users), the same per-machine assumption.
+      #
+      # The thing that IS certified, the installing user can find and launch it, is already proven by
+      # "Launch the INSTALLED binary" and "Click the primary button", both of which run as the
+      # installing user. RTD's proven build-and-verify-windows.yml has no cross-account gate either.
+      # scripts/verify-standard-user.ps1 and the deny_users_read break_mode are left in the repo but
+      # unused; both existed only to feed this retired check.
+
+      - name: Screenshot the desktop
+        if: always()
+        shell: pwsh
+        run: |
+          Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+          $b = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+          $bmp = New-Object System.Drawing.Bitmap $b.Width, $b.Height
+          $g = [System.Drawing.Graphics]::FromImage($bmp)
+          $g.CopyFromScreen($b.Location, [System.Drawing.Point]::Empty, $b.Size)
+          New-Item -ItemType Directory -Force -Path artifacts | Out-Null
+          $bmp.Save("artifacts/installed-app.png")
+          Write-Host "screenshot saved, $($b.Width)x$($b.Height)"
+
+      - name: Collect Windows Application event log
+        if: always()
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path artifacts | Out-Null
+          Get-EventLog -LogName Application -Newest 40 -EA SilentlyContinue |
+            Select-Object TimeGenerated,EntryType,Source,Message |
+            Format-List | Out-File artifacts/application-log.txt
+
+      # ── Publish, and only if everything above passed ──────────────────────
+      # Deliberately last, and gated on success(). A URL handed over is a URL that will be
+      # pasted into Partner Center, so nothing that failed a check gets one. Skipped entirely
+      # for break_mode runs, whose whole purpose is to produce a broken installer.
+      - name: Publish the signed installer to a permanent URL
+        if: ${{ success() && inputs.break_mode == 'none' && inputs.publish }}
+        id: publish
+        shell: pwsh
+        env:
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          # Not secrets: the account id and bucket name are in every published URL anyway.
+          R2_ACCOUNT_ID: a20a6afef6c2b00fa8406e8755103537
+          R2_BUCKET: keepthediff-downloads
+        run: |
+          $src = "${{ steps.find.outputs.path }}"
+          $version = [regex]::Match((Split-Path $src -Leaf), '(\d+\.\d+\.\d+)').Groups[1].Value
+          $sha = "${{ steps.src.outputs.sha }}"
+
+          # Keyed by commit sha, not version number. A version number gets reused during
+          # development and the URL must be immutable: Partner Center caches what it fetched,
+          # so the same URL quietly meaning something different later is the failure mode.
+          # r2-put refuses to overwrite, so publishing the same sha twice FAILS rather than
+          # silently replacing a package already submitted.
+          $pathname = "windows/$sha/KeepTheDiff-Setup-$version.exe"
+          $clean = "$env:RUNNER_TEMP\KeepTheDiff-Setup-$version.exe"
+          Copy-Item $src $clean   # the built name contains spaces; the URL should not
+
+          # Cloudflare R2 over the S3 API, replacing Vercel Blob: R2 charges nothing for egress,
+          # and serving an installer is almost all egress. The AWS SDK, not a CLI, so no
+          # human-shaped credential is needed. See ci/scripts/r2-put.mjs.
+          npm install --no-save --silent "@aws-sdk/client-s3@3"
+          node ci/scripts/r2-put.mjs $clean $pathname
+          if ($LASTEXITCODE -ne 0) { throw "R2 upload failed (exit $LASTEXITCODE)" }
+
+          # Deterministic: the bucket's custom domain plus the key. Nothing to parse back out of
+          # the upload, and the "Prove the URL is direct" step below fetches it to confirm.
+          $url = "https://dl.keepthediff.com/$pathname"
+          Write-Host "url=$url"
+          "url=$url" >> $env:GITHUB_OUTPUT
+          $url | Out-File artifacts/package-url.txt
+
+      # A URL is only handed over once it has actually been fetched. Partner Center rejects a
+      # redirecting link, which is exactly why GitHub release links cannot be used, and a URL
+      # that serves different bytes than were verified above would make this whole run
+      # meaningless.
+      - name: Prove the URL is direct and serves the bytes that were verified
+        if: ${{ success() && inputs.break_mode == 'none' && inputs.publish }}
+        shell: pwsh
+        run: |
+          $url = "${{ steps.publish.outputs.url }}"
+          $head = Invoke-WebRequest -Uri $url -Method Head -MaximumRedirection 0 -SkipHttpErrorCheck
+          Write-Host "HTTP $($head.StatusCode) $($head.StatusDescription)"
+          if ($head.StatusCode -ge 300 -and $head.StatusCode -lt 400) {
+            Write-Host "::error::The URL redirects (HTTP $($head.StatusCode) to $($head.Headers.Location)). Partner Center rejects redirecting package URLs."
+            exit 1
+          }
+          if ($head.StatusCode -ne 200) { throw "URL returned HTTP $($head.StatusCode)" }
+
+          $dl = "$env:RUNNER_TEMP\roundtrip.exe"
+          Invoke-WebRequest -Uri $url -OutFile $dl
+          $a = (Get-FileHash "${{ steps.find.outputs.path }}" -Algorithm SHA256).Hash
+          $b = (Get-FileHash $dl -Algorithm SHA256).Hash
+          Write-Host "built    SHA256: $a"
+          Write-Host "served   SHA256: $b"
+          if ($a -ne $b) { Write-Host "::error::The bytes at the URL are not the bytes that were built and verified."; exit 1 }
+
+          # The signature must survive the round trip too, since that is what a user downloads.
+          $sig = Get-AuthenticodeSignature $dl
+          Write-Host "downloaded file signature: $($sig.Status), signer $($sig.SignerCertificate.Subject)"
+          if ("${{ env.AZURE_CLIENT_ID }}" -ne "" -and $sig.Status -ne "Valid") {
+            Write-Host "::error::The downloaded installer is not validly signed."
+            exit 1
+          }
+          "`n$a  SHA256 of the published installer" | Out-File artifacts/package-url.txt -Append
+
+      - name: Say where the package is
+        if: ${{ success() && inputs.break_mode == 'none' && inputs.publish }}
+        shell: pwsh
+        run: |
+          "## Windows package" >> $env:GITHUB_STEP_SUMMARY
+          "" >> $env:GITHUB_STEP_SUMMARY
+          "Paste this into Partner Center:" >> $env:GITHUB_STEP_SUMMARY
+          "" >> $env:GITHUB_STEP_SUMMARY
+          "``${{ steps.publish.outputs.url }}``" >> $env:GITHUB_STEP_SUMMARY
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: windows-verification
+          path: artifacts/
