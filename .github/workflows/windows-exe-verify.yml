@@ -99,7 +99,7 @@ jobs:
       # workspace, which is destroyed with the VM, using a deploy key that has
       # read access to that one private repo and nothing else.
       - name: Check out the private source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: none298-dotcom/keepthediff
           ref: ${{ inputs.source_ref }}
@@ -109,7 +109,7 @@ jobs:
       # workspace root and cleans it. This is where the verification scripts
       # live; they are CI, not application source, so they stay in this repo.
       - name: Check out this repo's own scripts
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           path: ci
 
@@ -127,7 +127,7 @@ jobs:
         id: src
 
       - name: Setup JDK 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "17"
@@ -646,7 +646,7 @@ jobs:
           "" >> $env:GITHUB_STEP_SUMMARY
           "``${{ steps.publish.outputs.url }}``" >> $env:GITHUB_STEP_SUMMARY
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: windows-verification
