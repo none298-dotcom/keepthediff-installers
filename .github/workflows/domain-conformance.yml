@@ -1,0 +1,109 @@
+# The anti-drift guarantee, enforced by a machine rather than by remembering.
+#
+# Keep the Diff's domain is written TWICE, once in Swift and once in Kotlin, and
+# held to one shared JSON fixture. That guarantee is the whole reason the project
+# is shaped this way, and until this workflow existed it only actually held when
+# somebody ran both suites locally and happened to run them both.
+#
+# Why it lives in THIS repo rather than beside the source: Actions minutes are
+# metered on private repositories and free on public ones, so CI lives here and
+# reaches into the private source with a read-only deploy key, exactly as
+# windows-exe-verify.yml already does.
+#
+# Cost is why there are two jobs. Ubuntu bills at 1x and macOS at 10x, so the
+# Kotlin half (which alone executes every fixture case and is what catches the
+# Kotlin port drifting away from the committed fixture) runs on every push, and
+# the macOS half runs only when the domain or the fixture actually changed.
+name: Domain conformance
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: Branch, tag or sha of the private source to verify
+        required: false
+        default: main
+
+permissions:
+  contents: read
+
+jobs:
+  kotlin:
+    name: Kotlin domain against the shared fixture
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the private source
+        uses: actions/checkout@v7
+        with:
+          repository: none298-dotcom/keepthediff
+          ref: ${{ inputs.source_ref || 'main' }}
+          ssh-key: ${{ secrets.SOURCE_DEPLOY_KEY }}
+
+      - name: Record exactly which commit is being verified
+        run: |
+          # A green run against an unknown commit proves nothing.
+          echo "verifying $(git rev-parse HEAD)"
+          echo "  $(git log -1 --pretty=%s)"
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Kotlin domain suite
+        working-directory: android
+        run: ./gradlew --no-daemon :domain:test
+
+      # The counts are asserted inside the suites themselves, but printing them
+      # means a human skimming a log can see the fixture was actually executed
+      # rather than skipped.
+      - name: Report what ran
+        if: always()
+        working-directory: android
+        run: |
+          python3 - <<'PY'
+          import glob, xml.etree.ElementTree as ET
+          total = failed = 0
+          for path in glob.glob('domain/build/test-results/**/TEST-*.xml', recursive=True):
+              root = ET.parse(path).getroot()
+              total += int(root.get('tests', 0))
+              failed += int(root.get('failures', 0)) + int(root.get('errors', 0))
+          print(f'kotlin domain: {total} tests, {failed} failed')
+          PY
+
+  swift:
+    name: Swift domain, and the fixture is byte-deterministic
+    runs-on: macos-latest
+    steps:
+      - name: Check out the private source
+        uses: actions/checkout@v7
+        with:
+          repository: none298-dotcom/keepthediff
+          ref: ${{ inputs.source_ref || 'main' }}
+          ssh-key: ${{ secrets.SOURCE_DEPLOY_KEY }}
+
+      - name: Record exactly which commit is being verified
+        run: echo "verifying $(git rev-parse HEAD)"
+
+      - name: Swift domain suite
+        working-directory: ios/KeepTheDiffDomainCore
+        run: swift test
+
+      # The fixture is generated from the Swift port and consumed by both. If
+      # regenerating it changes a byte, the committed file no longer matches the
+      # code that produced it, and the Kotlin job above has been checking itself
+      # against a stale contract without either side failing.
+      - name: The committed fixture still matches the code that generates it
+        run: |
+          before=$(shasum -a 256 fixtures/domain-conformance.json | cut -d' ' -f1)
+          (cd ios/KeepTheDiffDomainCore && swift run GenerateFixtures >/dev/null)
+          after=$(shasum -a 256 fixtures/domain-conformance.json | cut -d' ' -f1)
+          if [ "$before" != "$after" ]; then
+            echo "::error::The committed fixture does not match what the generator produces."
+            git --no-pager diff --stat fixtures/domain-conformance.json
+            exit 1
+          fi
+          echo "fixture byte-deterministic: $after"
