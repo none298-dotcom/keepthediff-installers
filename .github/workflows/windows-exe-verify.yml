@@ -182,7 +182,12 @@ jobs:
       - name: Build the EXE
         working-directory: android
         shell: pwsh
-        run: ./gradlew.bat :desktop:packageExe --no-daemon
+        # `-Pdistribution=direct` EXPLICITLY. This is the installer people download from the
+        # site, so it must carry the updater; the Microsoft Store build is a different artifact
+        # built with `-Pdistribution=store`, which compiles no updater at all. The Gradle default
+        # is direct, and relying on a default for which variant gets SHIPPED is how a Store binary
+        # ends up containing an updater the store forbids.
+        run: ./gradlew.bat :desktop:packageExe -Pdistribution=direct --no-daemon
 
       - name: Find the installer
         id: find
