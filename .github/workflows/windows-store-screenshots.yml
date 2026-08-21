@@ -172,6 +172,13 @@ jobs:
             }
             Write-Host "$($_.Name): $($img.Width)x$($img.Height), $($seen.Count) distinct colours"
             if ($seen.Count -lt 5) { Write-Host "::error::$($_.Name) looks blank"; $bad++ }
+            # The size floor, actually asserted. The first green run of this job produced three
+            # perfectly good 960x720 captures, every one of them too small for the Store, because
+            # this step only counted colours while its own comment claimed to check dimensions.
+            if ($img.Width -lt 1366 -or $img.Height -lt 768) {
+              Write-Host "::error::$($_.Name) is $($img.Width)x$($img.Height), under the Store's 1366x768 floor"
+              $bad++
+            }
             $img.Dispose()
           }
           if ($bad -gt 0) { exit 1 }
