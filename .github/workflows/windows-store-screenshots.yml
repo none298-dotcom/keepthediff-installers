@@ -66,6 +66,18 @@ jobs:
           Copy-Item 'tools/seed/windows-state.json' (Join-Path $dir 'state.json') -Force
           Write-Host "seeded $dir"
 
+      # Build FIRST, as its own step, with its log on screen.
+      #
+      # The first attempt went straight to `run` with the output discarded by `Start-Process`, and
+      # when no window appeared after eight minutes there was nothing to look at: the failure said
+      # "window never appeared" whether the app was slow, the build was broken, or the dependency
+      # graph was still downloading. Resolving the graph here means the run step starts from a warm
+      # cache and any compile failure is reported as a compile failure.
+      - name: Build the desktop app
+        shell: pwsh
+        working-directory: android
+        run: .\gradlew.bat :desktop:classes --console=plain --no-daemon
+
       - name: Capture each screen
         shell: pwsh
         run: |
@@ -76,20 +88,37 @@ jobs:
             Write-Host "=== $screen ==="
             # `gradlew run` blocks while the window is open, so it is started detached and killed
             # once the frame is grabbed.
+            # Output goes to a file rather than nowhere, so a crashed or failed launch can be read
+            # back instead of being indistinguishable from a slow one.
+            $log = "$PWD\shots\gradle-$screen.log"
             $proc = Start-Process -PassThru -FilePath "$PWD\android\gradlew.bat" `
               -ArgumentList ':desktop:run', "--args=--screen=$screen", '--console=plain', '--no-daemon' `
-              -WorkingDirectory "$PWD\android"
+              -WorkingDirectory "$PWD\android" `
+              -RedirectStandardOutput $log -RedirectStandardError "$log.err"
 
             # Poll for the window with a deadline rather than sleeping a fixed guess. Compose
             # Desktop's first frame lands well after the JVM starts, and the first run also has to
             # resolve the whole Gradle dependency graph.
-            $deadline = (Get-Date).AddMinutes(8)
+            $deadline = (Get-Date).AddMinutes(6)
             $window = $null
             while ((Get-Date) -lt $deadline -and -not $window) {
               Start-Sleep -Seconds 5
-              $window = Get-Process | Where-Object { $_.MainWindowTitle -eq 'Keep the Diff' } | Select-Object -First 1
+              # Matched on a NON-EMPTY title containing the app name, not on equality. A JVM window
+              # can report its title late or with decoration, and an exact match silently never
+              # fires while the app is sitting there perfectly visible.
+              $window = Get-Process |
+                Where-Object { $_.MainWindowTitle -and $_.MainWindowTitle -like '*Keep the Diff*' } |
+                Select-Object -First 1
+              if ($proc.HasExited) { break }
             }
-            if (-not $window) { throw "window never appeared for '$screen'" }
+            if (-not $window) {
+              Write-Host "--- gradle stdout ---"; Get-Content $log -Tail 60 -EA SilentlyContinue
+              Write-Host "--- gradle stderr ---"; Get-Content "$log.err" -Tail 40 -EA SilentlyContinue
+              Write-Host "--- processes with windows ---"
+              Get-Process | Where-Object { $_.MainWindowTitle } |
+                Select-Object Id, ProcessName, MainWindowTitle | Format-Table | Out-String | Write-Host
+              throw "window never appeared for '$screen' (gradle exited: $($proc.HasExited))"
+            }
             # Let the first frame settle. A capture taken the instant the window exists catches it
             # mid-layout, which looks like a broken app rather than a slow screenshot.
             Start-Sleep -Seconds 8
