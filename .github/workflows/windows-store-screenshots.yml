@@ -39,10 +39,29 @@ jobs:
           ref: ${{ inputs.source_ref }}
           ssh-key: ${{ secrets.SOURCE_DEPLOY_KEY }}
 
-      - uses: actions/setup-java@v4
+      # 17, not 21. `android/desktop/build.gradle.kts` declares `jvmToolchain(17)`, and Gradle will
+      # not silently fall back to a newer JDK: it fails with "Cannot find a Java installation on your
+      # machine matching languageVersion=17", which reads like a runner problem and is a version
+      # mismatch. windows-exe-verify.yml builds the same module and already uses 17.
+      - name: Setup JDK 17
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
-          java-version: '21'
+          java-version: '17'
+
+      # Runners come up at 1024x768, which is BELOW the Microsoft Store's own 1366x768 floor for a
+      # listing image. Captured at the default, every screenshot this job produced would be rejected
+      # for being too small, and the app's window would also be taller than the screen it is drawn
+      # on. windows-exe-verify.yml hit the same thing: its first capture showed a window whose
+      # primary button was simply below the bottom of the display.
+      - name: Give the runner a display the window fits on
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          try { Set-DisplayResolution -Width 1920 -Height 1080 -Force } catch { Write-Host "::warning::Set-DisplayResolution failed: $_" }
+          Add-Type -AssemblyName System.Windows.Forms
+          $b = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+          Write-Host "display is now $($b.Width)x$($b.Height)"
 
       - name: Record which commit is being captured
         shell: pwsh
