@@ -1,0 +1,135 @@
+name: Windows store screenshots
+
+# Captures the desktop app ON WINDOWS for the Microsoft Store listing.
+#
+# WHY IT LIVES HERE AND NOT IN THE SOURCE REPO
+# The first attempt put this workflow in the private source repo and every job died in three
+# seconds, before a runner was assigned:
+#
+#   "The job was not started because recent account payments have failed or your spending limit
+#    needs to be increased."
+#
+# Actions is free on public repos and metered on private ones. windows-exe-verify.yml already
+# records this and AGENTS.md already states the rule; it was ignored anyway, and re-learned the
+# same way. Source is fetched into the ephemeral workspace with the read-only deploy key and never
+# lands in this repo.
+#
+# WHY IT IS NOT PART OF windows-exe-verify.yml
+# That workflow builds, signs and installs the packaged EXE, which is the right shape for proving a
+# build certifies and far too heavy for taking pictures. This runs the app straight from Gradle and
+# screenshots the WINDOW rather than the whole desktop: a listing image must be the app, not the
+# app on a runner's blank wallpaper.
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: Branch or sha of the source repo to capture
+        required: false
+        default: main
+
+jobs:
+  capture:
+    runs-on: windows-latest
+    steps:
+      - name: Check out the private source
+        uses: actions/checkout@v7
+        with:
+          repository: none298-dotcom/keepthediff
+          ref: ${{ inputs.source_ref }}
+          ssh-key: ${{ secrets.SOURCE_DEPLOY_KEY }}
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Record which commit is being captured
+        shell: pwsh
+        run: |
+          # Provenance. A listing image from an unknown commit proves nothing about what shipped.
+          $sha = git rev-parse HEAD
+          Write-Host "capturing keepthediff @ $sha"
+          New-Item -ItemType Directory -Force -Path shots | Out-Null
+          "source_sha: $sha" | Out-File shots/provenance.txt
+
+      - name: Seed a realistic ledger
+        shell: pwsh
+        run: |
+          # The app opens on whatever is in its own AppData folder, and an empty one screenshots as
+          # the first-run empty state: honest, and useless for a store listing.
+          #
+          # The seed is committed in the source repo rather than generated, because the Swift seeder
+          # does not run here and the two platforms persist different JSON anyway.
+          $dir = Join-Path $env:LOCALAPPDATA 'KeepTheDiff'
+          New-Item -ItemType Directory -Force -Path $dir | Out-Null
+          Copy-Item 'tools/seed/windows-state.json' (Join-Path $dir 'state.json') -Force
+          Write-Host "seeded $dir"
+
+      - name: Capture each screen
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Add-Type -AssemblyName System.Drawing, System.Windows.Forms, UIAutomationClient
+
+          foreach ($screen in @('home', 'goals', 'history')) {
+            Write-Host "=== $screen ==="
+            # `gradlew run` blocks while the window is open, so it is started detached and killed
+            # once the frame is grabbed.
+            $proc = Start-Process -PassThru -FilePath "$PWD\android\gradlew.bat" `
+              -ArgumentList ':desktop:run', "--args=--screen=$screen", '--console=plain', '--no-daemon' `
+              -WorkingDirectory "$PWD\android"
+
+            # Poll for the window with a deadline rather than sleeping a fixed guess. Compose
+            # Desktop's first frame lands well after the JVM starts, and the first run also has to
+            # resolve the whole Gradle dependency graph.
+            $deadline = (Get-Date).AddMinutes(8)
+            $window = $null
+            while ((Get-Date) -lt $deadline -and -not $window) {
+              Start-Sleep -Seconds 5
+              $window = Get-Process | Where-Object { $_.MainWindowTitle -eq 'Keep the Diff' } | Select-Object -First 1
+            }
+            if (-not $window) { throw "window never appeared for '$screen'" }
+            # Let the first frame settle. A capture taken the instant the window exists catches it
+            # mid-layout, which looks like a broken app rather than a slow screenshot.
+            Start-Sleep -Seconds 8
+
+            $element = [System.Windows.Automation.AutomationElement]::FromHandle($window.MainWindowHandle)
+            $r = $element.Current.BoundingRectangle
+            $bmp = New-Object System.Drawing.Bitmap([int]$r.Width), ([int]$r.Height)
+            $g = [System.Drawing.Graphics]::FromImage($bmp)
+            $g.CopyFromScreen([int]$r.X, [int]$r.Y, 0, 0, $bmp.Size)
+            $bmp.Save("$PWD\shots\$screen.png", [System.Drawing.Imaging.ImageFormat]::Png)
+            $g.Dispose(); $bmp.Dispose()
+            Write-Host "captured $screen at $([int]$r.Width)x$([int]$r.Height)"
+
+            Stop-Process -Id $window.Id -Force -ErrorAction SilentlyContinue
+            Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+            Start-Sleep -Seconds 4
+          }
+
+      - name: Refuse a blank or undersized capture
+        shell: pwsh
+        run: |
+          # A capture that is one flat colour, or smaller than the Store's 1366x768 floor, is a
+          # failed run that would otherwise upload happily and be rejected at certification much
+          # later, by which point nobody remembers this job ran.
+          Add-Type -AssemblyName System.Drawing
+          $bad = 0
+          Get-ChildItem shots\*.png | ForEach-Object {
+            $img = [System.Drawing.Image]::FromFile($_.FullName)
+            $seen = @{}
+            for ($x = 0; $x -lt $img.Width; $x += 40) {
+              for ($y = 0; $y -lt $img.Height; $y += 40) { $seen[$img.GetPixel($x, $y).ToArgb()] = $true }
+            }
+            Write-Host "$($_.Name): $($img.Width)x$($img.Height), $($seen.Count) distinct colours"
+            if ($seen.Count -lt 5) { Write-Host "::error::$($_.Name) looks blank"; $bad++ }
+            $img.Dispose()
+          }
+          if ($bad -gt 0) { exit 1 }
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: windows-store-screenshots
+          path: shots/*
