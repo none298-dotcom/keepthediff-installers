@@ -70,6 +70,18 @@ on:
       source_ref:
         description: "Branch or commit sha of keepthediff to build"
         default: "main"
+      # WHICH BINARY. `direct` carries the in-app updater and is what the website serves.
+      # `store` compiles no updater at all (a different Gradle source set, not a disabled flag),
+      # because both the Microsoft Store and the Mac App Store forbid an app that updates itself.
+      # These are two different products and they publish to two different URLs; submitting the
+      # `direct` EXE to Partner Center ships a forbidden updater inside a Store package.
+      distribution:
+        description: "direct = the download on the website, carries the updater. store = the Microsoft Store package, no updater."
+        type: choice
+        default: direct
+        options:
+          - direct
+          - store
       # OFF by default, and deliberately a separate decision from "did it pass".
       # Publishing is not a report, it is a commitment: the path is keyed by commit sha and
       # cannot be overwritten, so a sha published today can never be republished. While a
@@ -121,7 +133,7 @@ jobs:
           $sha = git rev-parse HEAD
           Write-Host "verifying keepthediff @ $sha"
           New-Item -ItemType Directory -Force -Path artifacts | Out-Null
-          "source_repo: none298-dotcom/keepthediff`nsource_ref: ${{ inputs.source_ref }}`nsource_sha: $sha`nbreak_mode: ${{ inputs.break_mode }}" |
+          "source_repo: none298-dotcom/keepthediff`nsource_ref: ${{ inputs.source_ref }}`nsource_sha: $sha`nbreak_mode: ${{ inputs.break_mode }}`ndistribution: ${{ inputs.distribution }}" |
             Out-File artifacts/provenance.txt
           "sha=$sha" >> $env:GITHUB_OUTPUT
         id: src
@@ -182,12 +194,11 @@ jobs:
       - name: Build the EXE
         working-directory: android
         shell: pwsh
-        # `-Pdistribution=direct` EXPLICITLY. This is the installer people download from the
-        # site, so it must carry the updater; the Microsoft Store build is a different artifact
-        # built with `-Pdistribution=store`, which compiles no updater at all. The Gradle default
-        # is direct, and relying on a default for which variant gets SHIPPED is how a Store binary
-        # ends up containing an updater the store forbids.
-        run: ./gradlew.bat :desktop:packageExe -Pdistribution=direct --no-daemon
+        # `-Pdistribution` EXPLICITLY, never left to the Gradle default. `direct` is the installer
+        # people download from the site and it must carry the updater; `store` is the Microsoft
+        # Store package and compiles no updater at all. Relying on a default for which variant gets
+        # SHIPPED is how a Store binary ends up containing an updater the store forbids.
+        run: ./gradlew.bat :desktop:packageExe -Pdistribution=${{ inputs.distribution }} --no-daemon
 
       - name: Find the installer
         id: find
@@ -263,6 +274,9 @@ jobs:
       # Deliberately BEFORE the install and publish steps: an updater that would reject its own
       # release is a reason not to ship the release.
       - name: Prove the in-app updater accepts this build and refuses everything else
+        # Skipped for a `store` build, which contains no updater to prove anything about: the test
+        # class lives in the `direct` source set and would not even compile here.
+        if: ${{ inputs.distribution == 'direct' }}
         # REPORTS, DOES NOT BLOCK, and that is temporary and deliberate.
         #
         # This step is about the in-app updater, a feature that is not shipped yet. It spent three
@@ -589,7 +603,17 @@ jobs:
           # so the same URL quietly meaning something different later is the failure mode.
           # r2-put refuses to overwrite, so publishing the same sha twice FAILS rather than
           # silently replacing a package already submitted.
-          $pathname = "windows/$sha/KeepTheDiff-Setup-$version.exe"
+          # The variant is IN THE PATH. Both builds carry the same version and can come from the
+          # same commit, so a sha-only key would make the second publish collide with the first —
+          # and r2-put refuses to overwrite, so it would fail rather than serve the wrong binary,
+          # but a failed release is still a failed release. `direct` keeps its historic shape so
+          # the URLs already on the website and in the appcast stay exactly where they are.
+          $variant = "${{ inputs.distribution }}"
+          $pathname = if ($variant -eq "store") {
+            "windows-store/$sha/KeepTheDiff-Setup-$version.exe"
+          } else {
+            "windows/$sha/KeepTheDiff-Setup-$version.exe"
+          }
           $clean = "$env:RUNNER_TEMP\KeepTheDiff-Setup-$version.exe"
           Copy-Item $src $clean   # the built name contains spaces; the URL should not
 
