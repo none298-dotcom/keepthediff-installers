@@ -95,10 +95,17 @@ jobs:
       - name: Build the desktop app
         shell: pwsh
         working-directory: android
-        run: .\gradlew.bat :desktop:classes --console=plain --no-daemon
+        # Same `-PdevTools=true` as the run step below. Without it here, this step compiles the
+        # source set WITHOUT the premium override and the run step reuses those classes, so the
+        # flag on the run alone would silently do nothing.
+        run: .\gradlew.bat :desktop:classes -PdevTools=true --console=plain --no-daemon
 
       - name: Capture each screen
         shell: pwsh
+        env:
+          # Read by the devTools source set only; in any build without -PdevTools=true the class
+          # that reads this does not exist.
+          KTD_PREMIUM_FOR_TESTING: 'true'
         run: |
           $ErrorActionPreference = 'Stop'
           Add-Type -AssemblyName System.Drawing, System.Windows.Forms, UIAutomationClient
@@ -110,8 +117,18 @@ jobs:
             # Output goes to a file rather than nowhere, so a crashed or failed launch can be read
             # back instead of being indistinguishable from a slow one.
             $log = "$PWD\shots\gradle-$screen.log"
+            # `-PdevTools=true` plus KTD_PREMIUM_FOR_TESTING is what makes Goals screenshot as a
+            # PREMIUM screen. Desktop entitlement is answered by keepthediff.com, and a runner has
+            # no subscription, so `checkEntitlement()` returns "not premium" and overwrites the
+            # seeded flag before the first frame -- the Goals capture came out showing the free
+            # tier's single goal behind a paywall rather than the three the seed contains.
+            #
+            # The flag selects a source set rather than branching at runtime: without it the
+            # override does not exist in the compiled output at all, and it cannot be combined with
+            # `-Pdistribution=store`, which fails the build outright. See the desktop module's
+            # build.gradle.kts.
             $proc = Start-Process -PassThru -FilePath "$PWD\android\gradlew.bat" `
-              -ArgumentList ':desktop:run', "--args=--screen=$screen", '--console=plain', '--no-daemon' `
+              -ArgumentList ':desktop:run', '-PdevTools=true', "--args=--screen=$screen", '--console=plain', '--no-daemon' `
               -WorkingDirectory "$PWD\android" `
               -RedirectStandardOutput $log -RedirectStandardError "$log.err"
 
