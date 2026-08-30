@@ -200,6 +200,35 @@ jobs:
           }
           if ($bad -gt 0) { exit 1 }
 
+      - name: Trim the runner's wallpaper off the edges
+        shell: pwsh
+        run: |
+          # The window capture includes a few pixels outside the window's own frame -- an 8px strip
+          # down the left and a row top and bottom -- which arrives as the runner's desktop
+          # wallpaper along the edge of an otherwise clean listing image. Cropped identically across
+          # all three so the set stays consistent; a set where one image is 8px narrower than the
+          # others reads as three from one app and one from somewhere else.
+          #
+          # 1424x891 is comfortably above the Microsoft Store's 1366x768 floor, which is the only
+          # dimension constraint that applies here.
+          Add-Type -AssemblyName System.Drawing
+          foreach ($n in @('home','goals','history')) {
+            $path = "$PWD\shots\$n.png"
+            $src = [System.Drawing.Image]::FromFile($path)
+            $rect = New-Object System.Drawing.Rectangle 8, 1, 1424, 891
+            if ($rect.Right -gt $src.Width -or $rect.Bottom -gt $src.Height) {
+              $src.Dispose()
+              throw "$n.png is $($src.Width)x$($src.Height), too small for the crop box"
+            }
+            $dst = New-Object System.Drawing.Bitmap $rect.Width, $rect.Height
+            $g = [System.Drawing.Graphics]::FromImage($dst)
+            $g.DrawImage($src, (New-Object System.Drawing.Rectangle 0, 0, $rect.Width, $rect.Height), $rect, [System.Drawing.GraphicsUnit]::Pixel)
+            $g.Dispose(); $src.Dispose()
+            $dst.Save($path, [System.Drawing.Imaging.ImageFormat]::Png)
+            $dst.Dispose()
+            Write-Host "cropped $n.png to $($rect.Width)x$($rect.Height)"
+          }
+
       - uses: actions/upload-artifact@v4
         if: always()
         with:
