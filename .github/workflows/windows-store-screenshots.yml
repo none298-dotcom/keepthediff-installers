@@ -155,8 +155,22 @@ jobs:
                 Select-Object Id, ProcessName, MainWindowTitle | Format-Table | Out-String | Write-Host
               throw "window never appeared for '$screen' (gradle exited: $($proc.HasExited))"
             }
+            # PARK THE CURSOR FIRST, because where it sits ends up in the picture.
+            #
+            # A headless runner starts with the pointer at the middle of the virtual screen, and
+            # the middle of a 1424x891 Compose window is inside the third goal card. Compose draws
+            # a hover background under it, so `goals.png` shipped to the Microsoft Store with one
+            # of three identical cards greyed out for no reason a shopper could work out. It is not
+            # a click and nothing is focused; the app is simply telling the truth about where the
+            # mouse is.
+            #
+            # The top left corner is off every control and outside the window, so nothing is hovered
+            # and the arrow itself is not in the captured rectangle either.
+            [System.Windows.Forms.Cursor]::Position = New-Object System.Drawing.Point(0, 0)
+
             # Let the first frame settle. A capture taken the instant the window exists catches it
-            # mid-layout, which looks like a broken app rather than a slow screenshot.
+            # mid-layout, which looks like a broken app rather than a slow screenshot. It is also
+            # long enough for the hover the line above just left to fade out of the frame.
             Start-Sleep -Seconds 8
 
             $element = [System.Windows.Automation.AutomationElement]::FromHandle($window.MainWindowHandle)
