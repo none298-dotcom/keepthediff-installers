@@ -106,12 +106,18 @@ jobs:
     env:
       AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
       AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+      # Workflow inputs reach the PowerShell steps through env, never by `${{ inputs.x }}` pasted
+      # into a script body, where a crafted value would become code. Security review 2026-09-13.
+      SOURCE_REF: ${{ inputs.source_ref }}
+      BREAK_MODE: ${{ inputs.break_mode }}
+      DISTRIBUTION: ${{ inputs.distribution }}
+      WAIT_SECONDS: ${{ inputs.wait_seconds }}
     steps:
       # The source is NOT in this repo. It is fetched here into the runner's
       # workspace, which is destroyed with the VM, using a deploy key that has
       # read access to that one private repo and nothing else.
       - name: Check out the private source
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           repository: none298-dotcom/keepthediff
           ref: ${{ inputs.source_ref }}
@@ -121,7 +127,7 @@ jobs:
       # workspace root and cleans it. This is where the verification scripts
       # live; they are CI, not application source, so they stay in this repo.
       - name: Check out this repo's own scripts
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           path: ci
 
@@ -133,13 +139,13 @@ jobs:
           $sha = git rev-parse HEAD
           Write-Host "verifying keepthediff @ $sha"
           New-Item -ItemType Directory -Force -Path artifacts | Out-Null
-          "source_repo: none298-dotcom/keepthediff`nsource_ref: ${{ inputs.source_ref }}`nsource_sha: $sha`nbreak_mode: ${{ inputs.break_mode }}`ndistribution: ${{ inputs.distribution }}" |
+          "source_repo: none298-dotcom/keepthediff`nsource_ref: $env:SOURCE_REF`nsource_sha: $sha`nbreak_mode: $env:BREAK_MODE`ndistribution: $env:DISTRIBUTION" |
             Out-File artifacts/provenance.txt
           "sha=$sha" >> $env:GITHUB_OUTPUT
         id: src
 
       - name: Setup JDK 17
-        uses: actions/setup-java@v5
+        uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
         with:
           distribution: temurin
           java-version: "17"
@@ -168,7 +174,7 @@ jobs:
           # Each patch must be verified to have APPLIED. A find-and-replace that silently
           # matches nothing produces a clean build, a green run, and the false conclusion
           # that the assertion caught something. Every branch below fails loudly instead.
-          switch ("${{ inputs.break_mode }}") {
+          switch ($env:BREAK_MODE) {
             "per_user_install" {
               $f = "android/desktop/build.gradle.kts"
               $t = Get-Content $f -Raw
@@ -198,7 +204,7 @@ jobs:
         # people download from the site and it must carry the updater; `store` is the Microsoft
         # Store package and compiles no updater at all. Relying on a default for which variant gets
         # SHIPPED is how a Store binary ends up containing an updater the store forbids.
-        run: ./gradlew.bat :desktop:packageExe -Pdistribution=${{ inputs.distribution }} --no-daemon
+        run: ./gradlew.bat :desktop:packageExe "-Pdistribution=$env:DISTRIBUTION" --no-daemon
 
       - name: Find the installer
         id: find
@@ -221,7 +227,7 @@ jobs:
       # "SignerSign() failed", which reads like a signing problem rather than an auth one.
       - name: Azure login (federated, OIDC)
         if: ${{ env.AZURE_CLIENT_ID != '' }}
-        uses: azure/login@v2
+        uses: azure/login@7184910d9eb2b1c5e48f7073824a90609bb9b6d6 # v2
         with:
           client-id: ${{ env.AZURE_CLIENT_ID }}
           tenant-id: ${{ env.AZURE_TENANT_ID }}
@@ -229,7 +235,7 @@ jobs:
 
       - name: Sign the installer (Azure Trusted Signing)
         if: ${{ env.AZURE_CLIENT_ID != '' }}
-        uses: azure/trusted-signing-action@v0
+        uses: azure/trusted-signing-action@1d365fec12862c4aa68fcac418143d73f0cea293 # v0
         with:
           azure-tenant-id: ${{ env.AZURE_TENANT_ID }}
           azure-client-id: ${{ env.AZURE_CLIENT_ID }}
@@ -483,12 +489,12 @@ jobs:
           if (-not $exe) { throw "Installed binary not found under %LOCALAPPDATA% or Program Files" }
           Write-Host "launching: $($exe.FullName)"
           $proc = Start-Process -FilePath $exe.FullName -PassThru
-          Start-Sleep -Seconds ${{ inputs.wait_seconds }}
+          Start-Sleep -Seconds ([int]$env:WAIT_SECONDS)
           if ($proc.HasExited) {
             Write-Host "::error::The installed app exited with code $($proc.ExitCode). A jpackage build dies here when the modules() list omits something reached only at runtime, and nothing before this step can tell you."
             exit 1
           }
-          Write-Host "still running after ${{ inputs.wait_seconds }}s"
+          Write-Host "still running after $($env:WAIT_SECONDS)s"
           "pid=$($proc.Id)" >> $env:GITHUB_OUTPUT
           "exe=$($exe.FullName)" >> $env:GITHUB_OUTPUT
 
@@ -608,7 +614,7 @@ jobs:
           # and r2-put refuses to overwrite, so it would fail rather than serve the wrong binary,
           # but a failed release is still a failed release. `direct` keeps its historic shape so
           # the URLs already on the website and in the appcast stay exactly where they are.
-          $variant = "${{ inputs.distribution }}"
+          $variant = $env:DISTRIBUTION
           $pathname = if ($variant -eq "store") {
             "windows-store/$sha/KeepTheDiff-Setup-$version.exe"
           } else {
@@ -675,7 +681,7 @@ jobs:
           "" >> $env:GITHUB_STEP_SUMMARY
           "``${{ steps.publish.outputs.url }}``" >> $env:GITHUB_STEP_SUMMARY
 
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         if: always()
         with:
           name: windows-verification
