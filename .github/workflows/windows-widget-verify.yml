@@ -30,6 +30,11 @@ on:
       source_ref:
         description: "Branch or commit sha of keepthediff to verify"
         default: "main"
+  # A workflow file that is not yet on the default branch cannot be dispatched, so a pull request
+  # that changes this file runs it too, against SOURCE_REF's fallback below.
+  pull_request:
+    paths:
+      - .github/workflows/windows-widget-verify.yml
 
 permissions:
   contents: read
@@ -41,7 +46,7 @@ jobs:
     env:
       AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
       AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
-      SOURCE_REF: ${{ inputs.source_ref }}
+      SOURCE_REF: ${{ inputs.source_ref || 'scratch/windows-widget-ci' }}
       PUBLISHER: "CN=Little Bird Trading LLC, O=Little Bird Trading LLC, L=Newark, S=Delaware, C=US"
       PACKAGE_NAME: LittleBirdTradingLLC.KeepTheDiff.Widgets
       CLSID: 98FFD35F-CACC-4217-AFEC-532DE6491746
@@ -51,7 +56,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           repository: none298-dotcom/keepthediff
-          ref: ${{ inputs.source_ref }}
+          ref: ${{ env.SOURCE_REF }}
           ssh-key: ${{ secrets.SOURCE_DEPLOY_KEY }}
 
       - name: Record which commit is being verified
