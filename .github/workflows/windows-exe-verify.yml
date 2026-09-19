@@ -197,6 +197,55 @@ jobs:
             }
           }
 
+      # ── The Windows 11 widgets, built and signed BEFORE the EXE ─────────────
+      # The provider and its sparse MSIX ship inside the installer (build.gradle.kts's
+      # appResourcesRootDir), so they must be built, signed and staged before Gradle packages it.
+      # The installed app registers the MSIX on launch. See android/desktop/windows-widget/README.md,
+      # and windows-widget-verify.yml for everything about them this runner can prove.
+      - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Build the widget provider and pack its sparse MSIX
+        shell: pwsh
+        run: ./android/desktop/windows-widget/build.ps1 -OutDir "$env:RUNNER_TEMP\widget-build"
+
+      # Signed with the installer's own identity: the manifest's Publisher is that certificate's
+      # subject, and an unsigned sparse package cannot be registered outside developer mode.
+      - name: Azure login for the widget MSIX (federated, OIDC)
+        if: ${{ env.AZURE_CLIENT_ID != '' }}
+        uses: azure/login@7184910d9eb2b1c5e48f7073824a90609bb9b6d6 # v2
+        with:
+          client-id: ${{ env.AZURE_CLIENT_ID }}
+          tenant-id: ${{ env.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Sign the widget MSIX (Azure Trusted Signing)
+        if: ${{ env.AZURE_CLIENT_ID != '' }}
+        uses: azure/trusted-signing-action@1d365fec12862c4aa68fcac418143d73f0cea293 # v0
+        with:
+          azure-tenant-id: ${{ env.AZURE_TENANT_ID }}
+          azure-client-id: ${{ env.AZURE_CLIENT_ID }}
+          endpoint: https://eus.codesigning.azure.net/
+          trusted-signing-account-name: mlcsigning
+          certificate-profile-name: mlc-public-trust
+          files: ${{ runner.temp }}\widget-build\KeepTheDiffWidgets.msix
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+
+      # The Azure session is not needed again until the installer is signed, so it does not sit
+      # beside the Gradle build.
+      - name: Stage the widget into the app resources
+        shell: pwsh
+        run: |
+          if ("${{ env.AZURE_CLIENT_ID }}" -eq "") {
+            Write-Host "::warning::No Azure credentials, so the widget MSIX is UNSIGNED and will not register on a customer's machine. Fine for a fork, never for a release."
+          } else {
+            az logout 2>$null
+          }
+          ./android/desktop/windows-widget/build.ps1 -OutDir "$env:RUNNER_TEMP\widget-build" -Stage
+
       - name: Build the EXE
         working-directory: android
         shell: pwsh
@@ -215,6 +264,19 @@ jobs:
           if (-not $exe) { throw "No .exe produced" }
           Write-Host "installer: $($exe.FullName)  ($([int]($exe.Length/1MB)) MB)"
           "path=$($exe.FullName)" >> $env:GITHUB_OUTPUT
+
+      # jpackage copies the resources folder as it finds it, so a staging step that silently did
+      # nothing would ship an installer without widgets and nothing else would notice.
+      - name: Assert the widget is inside the app image
+        shell: pwsh
+        run: |
+          $widget = Get-ChildItem android/desktop/build/compose/binaries/main/app -Recurse -Directory -Filter widget |
+                    Where-Object { Test-Path (Join-Path $_.FullName "KeepTheDiffWidgets.msix") } | Select-Object -First 1
+          if (-not $widget) { throw "The app image has no resources\widget folder holding KeepTheDiffWidgets.msix" }
+          foreach ($f in "KeepTheDiffWidgetProvider.exe", "Microsoft.Windows.Widgets.dll", "Assets\plus-light.png") {
+            if (-not (Test-Path (Join-Path $widget.FullName $f))) { throw "The app image's widget folder has no $f" }
+          }
+          Write-Host "widget in the app image: $($widget.FullName) ($((Get-ChildItem $widget.FullName -Recurse -File).Count) files)"
 
       # ── Authenticode signing ──────────────────────────────────────────────
       # Signed with a short-lived certificate Azure mints per run. Authentication is
@@ -497,6 +559,23 @@ jobs:
           Write-Host "still running after $($env:WAIT_SECONDS)s"
           "pid=$($proc.Id)" >> $env:GITHUB_OUTPUT
           "exe=$($exe.FullName)" >> $env:GITHUB_OUTPUT
+
+      # The app registers its own widget package on launch, in the background. Blocking once the
+      # source calls the registration; before that, a warning, so this workflow never demands a
+      # wiring the source has not done yet.
+      - name: Assert the installed app registered its widgets
+        shell: powershell
+        run: |
+          $wired = Select-String -Path android/desktop/src/main/kotlin/com/keepthediff/desktop/Main.kt -Pattern 'WidgetPackageRegistration.registerInBackground' -Quiet
+          $pkg = $null; $deadline = (Get-Date).AddSeconds(120)
+          while (-not $pkg -and (Get-Date) -lt $deadline) { $pkg = Get-AppxPackage -Name LittleBirdTradingLLC.KeepTheDiff.Widgets; if (-not $pkg) { Start-Sleep 3 } }
+          if ($pkg) { Write-Host "widget package registered by the app: $($pkg.PackageFullName)"; exit 0 }
+          $log = "$env:LOCALAPPDATA\KeepTheDiff\widget-registration.log"
+          if (Test-Path $log) { Get-Content $log | Write-Host }
+          if (-not $wired) { Write-Host "::warning::Main.kt does not call WidgetPackageRegistration.registerInBackground() yet, so the widgets are shipped but never registered."; exit 0 }
+          if ("${{ env.AZURE_CLIENT_ID }}" -eq "") { Write-Host "::warning::Not registered, as expected for an unsigned MSIX."; exit 0 }
+          Write-Host "::error::The installed app did not register its widget package within 120 s."
+          exit 1
 
       # The build shipped with the stock Java placeholder in its title bar and in Alt+Tab, and
       # the owner has failed store submissions over exactly that before. It was caught by a
