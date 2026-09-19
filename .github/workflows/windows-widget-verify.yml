@@ -1,0 +1,381 @@
+name: Verify the Windows 11 widgets
+
+# Everything about the Windows 11 widgets that a machine without a Widgets Board can prove, on the
+# installed app, end to end. Verification only: it publishes nothing.
+#
+#  1. The provider builds (self-contained, trimmed) and the sparse MSIX packs and signs: with the
+#     real Trusted Signing certificate where Azure accepts this ref (main), otherwise with a CI-only
+#     self-signed certificate carrying the SAME subject, trusted on this runner only.
+#  2. Both are staged into the app's resources and the EXE is built with them, installed silently,
+#     and launched. The APP registers the package itself (WidgetPackageRegistration.kt) and writes
+#     widget.json (WidgetSnapshotWriter.kt). Nothing here registers it on the app's behalf.
+#  3. The registered manifest carries the COM server, the widgets extension with all three widgets,
+#     and the Widgets runtime classes, and the external location is the installed widget folder.
+#  4. The provider's COM class activates the way the board activates it: the exe starts from the
+#     install, with the package identity, and stays up.
+#  5. Log a Diff opens the app with --screen=add OUTSIDE the widget package, even from a provider
+#     that was itself started with -PreventBreakaway, the worst case. A control proves the identity
+#     check can tell the difference.
+#  6. The cards: dumped by the installed provider for the widget.json the installed app wrote, and
+#     for every fixture state, then drawn to PNG with the Widgets Board host configs.
+#  7. Uninstalling the app leaves the package registered (documented; jpackage has no uninstall
+#     hook), and Remove-AppxPackage removes it, after which the class no longer activates.
+#
+# NOT proved, by any runner: that the board lists the widgets, renders the cards or delivers a
+# click. Windows Server has no Widgets Board. That needs a Windows 11 PC.
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: "Branch or commit sha of keepthediff to verify"
+        default: "main"
+
+permissions:
+  contents: read
+  id-token: write     # OIDC for Azure Trusted Signing. Only accepted from main.
+
+jobs:
+  verify:
+    runs-on: windows-latest
+    env:
+      AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+      AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+      SOURCE_REF: ${{ inputs.source_ref }}
+      PUBLISHER: "CN=Little Bird Trading LLC, O=Little Bird Trading LLC, L=Newark, S=Delaware, C=US"
+      PACKAGE_NAME: LittleBirdTradingLLC.KeepTheDiff.Widgets
+      CLSID: 98FFD35F-CACC-4217-AFEC-532DE6491746
+      OUT: ${{ github.workspace }}\widget-proof
+    steps:
+      - name: Check out the private source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: none298-dotcom/keepthediff
+          ref: ${{ inputs.source_ref }}
+          ssh-key: ${{ secrets.SOURCE_DEPLOY_KEY }}
+
+      - name: Record which commit is being verified
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path $env:OUT | Out-Null
+          "keepthediff @ $(git rev-parse HEAD) (ref $env:SOURCE_REF)" | Tee-Object "$env:OUT\provenance.txt"
+
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Build the provider and pack the sparse MSIX
+        shell: pwsh
+        run: ./android/desktop/windows-widget/build.ps1 -OutDir "$env:RUNNER_TEMP\widget-build"
+
+      # ── Signing ─────────────────────────────────────────────────────────────
+      # Azure's federated credential is scoped to main, deliberately: a feature branch must not be
+      # able to mint a production signing token. So from any other ref the login fails, and the
+      # package is signed with a throwaway certificate with the same subject instead, which proves
+      # every step after this one and never leaves the runner.
+      - name: Azure login (federated, OIDC)
+        id: azure
+        if: ${{ env.AZURE_CLIENT_ID != '' }}
+        continue-on-error: true
+        uses: azure/login@7184910d9eb2b1c5e48f7073824a90609bb9b6d6 # v2
+        with:
+          client-id: ${{ env.AZURE_CLIENT_ID }}
+          tenant-id: ${{ env.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Sign the MSIX (Azure Trusted Signing)
+        if: ${{ steps.azure.outcome == 'success' }}
+        uses: azure/trusted-signing-action@1d365fec12862c4aa68fcac418143d73f0cea293 # v0
+        with:
+          azure-tenant-id: ${{ env.AZURE_TENANT_ID }}
+          azure-client-id: ${{ env.AZURE_CLIENT_ID }}
+          endpoint: https://eus.codesigning.azure.net/
+          trusted-signing-account-name: mlcsigning
+          certificate-profile-name: mlc-public-trust
+          files: ${{ runner.temp }}\widget-build\KeepTheDiffWidgets.msix
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+
+      - name: Sign the MSIX with a CI-only test certificate (not main)
+        if: ${{ steps.azure.outcome != 'success' }}
+        shell: pwsh
+        run: |
+          Write-Host "::warning::Azure signing is not available from this ref, so the MSIX is signed with a throwaway certificate whose subject matches the real one. Only a run from main proves the real certificate."
+          $cert = New-SelfSignedCertificate -Type Custom -Subject $env:PUBLISHER -KeyUsage DigitalSignature `
+            -FriendlyName "Keep the Diff CI test signing" -CertStoreLocation Cert:\CurrentUser\My `
+            -TextExtension @("2.5.29.37={text}1.3.6.1.5.5.7.3.3", "2.5.29.19={text}")
+          $cer = "$env:RUNNER_TEMP\ci-test.cer"
+          Export-Certificate -Cert $cert -FilePath $cer | Out-Null
+          Import-Certificate -FilePath $cer -CertStoreLocation Cert:\LocalMachine\TrustedPeople | Out-Null
+          $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin" -Recurse -Filter signtool.exe |
+            Where-Object { $_.FullName -match '\\x64\\' } | Sort-Object FullName | Select-Object -Last 1
+          & $signtool.FullName sign /fd SHA256 /sha1 $cert.Thumbprint "$env:RUNNER_TEMP\widget-build\KeepTheDiffWidgets.msix"
+          if ($LASTEXITCODE -ne 0) { throw "signtool failed" }
+
+      - name: Stage the provider and the signed MSIX into the app's resources
+        shell: pwsh
+        run: ./android/desktop/windows-widget/build.ps1 -OutDir "$env:RUNNER_TEMP\widget-build" -Stage
+
+      # ── The installed app ───────────────────────────────────────────────────
+      # Unsigned EXE: its signature is windows-exe-verify's business. What matters here is that the
+      # installer carries the widget and the installed app registers it.
+      - name: Build the EXE
+        working-directory: android
+        shell: pwsh
+        run: ./gradlew.bat :desktop:packageExe "-Pdistribution=direct" --no-daemon --console=plain
+
+      - name: Install silently, launch, and wait for the app to register its widgets
+        id: app
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          $installer = Get-ChildItem android/desktop/build/compose/binaries/main/exe -Filter *.exe | Select-Object -First 1
+          $p = Start-Process $installer.FullName -ArgumentList '/quiet' -Wait -PassThru
+          if ($p.ExitCode -ne 0 -and $p.ExitCode -ne 3010) { throw "Install failed with $($p.ExitCode)" }
+          $app = Get-ChildItem "$env:LOCALAPPDATA\Keep the Diff", "$env:ProgramFiles\Keep the Diff" -Filter "Keep the Diff.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $app) { throw "Installed, but Keep the Diff.exe was not found" }
+          $widgetDir = Join-Path $app.DirectoryName "app\resources\widget"
+          Write-Host "app:    $($app.FullName)"
+          Write-Host "widget: $widgetDir"
+          foreach ($f in "KeepTheDiffWidgetProvider.exe", "KeepTheDiffWidgets.msix", "Microsoft.Windows.Widgets.dll", "Assets\plus-light.png") {
+            if (-not (Test-Path (Join-Path $widgetDir $f))) { throw "The installed app has no $f in $widgetDir" }
+          }
+          if (Get-AppxPackage -Name $env:PACKAGE_NAME) { throw "The package was registered before the app ever ran, so this proves nothing about the app" }
+
+          Start-Process $app.FullName | Out-Null
+          $pkg = $null; $deadline = (Get-Date).AddSeconds(180)
+          while (-not $pkg -and (Get-Date) -lt $deadline) { Start-Sleep 3; $pkg = Get-AppxPackage -Name $env:PACKAGE_NAME }
+          $data = "$env:LOCALAPPDATA\KeepTheDiff"
+          if (-not $pkg) {
+            if (Test-Path "$data\widget-registration.log") { Get-Content "$data\widget-registration.log" | Write-Host }
+            throw "The app did not register the widget package within 180 s of launching"
+          }
+          Write-Host "registered by the app: $($pkg.PackageFullName)"
+          $deadline = (Get-Date).AddSeconds(60)
+          while (-not (Test-Path "$data\widget.json") -and (Get-Date) -lt $deadline) { Start-Sleep 2 }
+          if (-not (Test-Path "$data\widget.json")) { throw "The app did not write widget.json" }
+          Copy-Item "$data\widget.json" "$env:OUT\widget-written-by-the-app.json"
+          Get-Content "$data\widget.json" | Write-Host
+          "exe=$($app.FullName)" >> $env:GITHUB_OUTPUT
+          "widget=$widgetDir" >> $env:GITHUB_OUTPUT
+
+      - name: Inspect the registered package
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          $pkg = Get-AppxPackage -Name $env:PACKAGE_NAME
+          $pkg | Format-List * | Out-String | Tee-Object "$env:OUT\registered-package.txt" | Write-Host
+          $manifest = Get-AppxPackageManifest -Package $pkg.PackageFullName
+          $manifest.OuterXml | Out-File "$env:OUT\registered-manifest.xml"
+          $failures = @()
+          $xml = $manifest.OuterXml
+          if ($xml -notmatch "com:Class Id=`"$env:CLSID`"") { $failures += "no COM class $env:CLSID" }
+          if ($xml -notmatch 'Name="com.microsoft.windows.widgets"') { $failures += "no widgets app extension" }
+          foreach ($id in "ThisWeek", "Goal", "LogADiff") { if ($xml -notmatch "Definition Id=`"$id`"") { $failures += "no widget definition $id" } }
+          if ($xml -notmatch 'Microsoft.Windows.Widgets.Providers.WidgetManager') { $failures += "no WidgetManager activatable class" }
+          if ($pkg.Publisher -ne $env:PUBLISHER) { $failures += "publisher is '$($pkg.Publisher)'" }
+          if ($pkg.SignatureKind) { Write-Host "signature kind: $($pkg.SignatureKind)" }
+          if ($failures) { $failures | ForEach-Object { Write-Host "::error::$_" }; exit 1 }
+          Write-Host "ok: COM server, widgets extension with ThisWeek, Goal and LogADiff, and the Widgets runtime classes are registered"
+
+      - name: Activate the provider's COM class the way the board does
+        shell: powershell
+        env:
+          WIDGET_DIR: ${{ steps.app.outputs.widget }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          Add-Type -Namespace Proof -Name Win -MemberDefinition @'
+          [DllImport("kernel32.dll")] public static extern IntPtr OpenProcess(uint access, bool inherit, int pid);
+          [DllImport("kernel32.dll")] public static extern bool CloseHandle(IntPtr h);
+          [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] public static extern int GetPackageFullName(IntPtr process, ref uint length, System.Text.StringBuilder name);
+          public static string PackageOf(int pid) {
+            IntPtr h = OpenProcess(0x1000, false, pid);
+            if (h == IntPtr.Zero) return "<cannot open>";
+            try { uint len = 0; if (GetPackageFullName(h, ref len, null) == 15700) return "";
+                  var sb = new System.Text.StringBuilder((int)len + 1); return GetPackageFullName(h, ref len, sb) == 0 ? sb.ToString() : "<error>"; }
+            finally { CloseHandle(h); }
+          }
+          '@
+          $started = Get-Date
+          $object = [Activator]::CreateInstance([Type]::GetTypeFromCLSID([Guid]$env:CLSID))
+          Write-Host "CoCreateInstance {$env:CLSID} returned $($object.GetType().FullName)"
+          Start-Sleep 15
+          $procs = @(Get-Process KeepTheDiffWidgetProvider -ErrorAction SilentlyContinue)
+          if ($procs.Count -ne 1) { throw "Expected one running provider 15 s after activation, found $($procs.Count)" }
+          $identity = [Proof.Win]::PackageOf($procs[0].Id)
+          Write-Host "provider pid $($procs[0].Id): $($procs[0].Path), identity '$identity', up $([int]((Get-Date) - $procs[0].StartTime).TotalSeconds) s"
+          if ($procs[0].Path -ne (Join-Path $env:WIDGET_DIR "KeepTheDiffWidgetProvider.exe")) { throw "The provider ran from $($procs[0].Path)" }
+          if ($identity -notlike "$env:PACKAGE_NAME*") { throw "The provider runs without the widget package identity" }
+          $crashes = @(Get-WinEvent -FilterHashtable @{ LogName = 'Application'; StartTime = $started } -ErrorAction SilentlyContinue |
+            Where-Object { $_.Message -like '*KeepTheDiffWidgetProvider*' })
+          $crashes | ForEach-Object { Write-Host "::error::[$($_.ProviderName)] $(($_.Message -split "`n" | Select-Object -First 8) -join ' | ')" }
+          if ($crashes) { exit 1 }
+          [void][Runtime.InteropServices.Marshal]::ReleaseComObject($object)
+          Stop-Process -Id $procs[0].Id -Force
+          Write-Host "ok: the class activates, the provider starts from the install with the package identity and stays up"
+
+      - name: Log a Diff opens the app outside the widget package
+        shell: powershell
+        env:
+          APP_EXE: ${{ steps.app.outputs.exe }}
+          WIDGET_DIR: ${{ steps.app.outputs.widget }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          Add-Type -Namespace Proof -Name Win -MemberDefinition @'
+          [DllImport("kernel32.dll")] public static extern IntPtr OpenProcess(uint access, bool inherit, int pid);
+          [DllImport("kernel32.dll")] public static extern bool CloseHandle(IntPtr h);
+          [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] public static extern int GetPackageFullName(IntPtr process, ref uint length, System.Text.StringBuilder name);
+          public static string PackageOf(int pid) {
+            IntPtr h = OpenProcess(0x1000, false, pid);
+            if (h == IntPtr.Zero) return "<cannot open>";
+            try { uint len = 0; if (GetPackageFullName(h, ref len, null) == 15700) return "";
+                  var sb = new System.Text.StringBuilder((int)len + 1); return GetPackageFullName(h, ref len, sb) == 0 ? sb.ToString() : "<error>"; }
+            finally { CloseHandle(h); }
+          }
+          '@
+          $pkg = Get-AppxPackage -Name $env:PACKAGE_NAME
+          $provider = Join-Path $env:WIDGET_DIR "KeepTheDiffWidgetProvider.exe"
+          function App-Processes { @(Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -eq $env:APP_EXE }) }
+          function Stop-App { App-Processes | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }; Start-Sleep 5 }
+          function In-Package([string]$command, [string]$arguments) {
+            Invoke-CommandInDesktopPackage -PackageFamilyName $pkg.PackageFamilyName -AppId KeepTheDiffWidgets -Command $command -Args $arguments -PreventBreakaway | Out-Null
+          }
+          $failures = @()
+
+          Write-Host "==> The provider's WidgetManager, activated inside the package"
+          $manager = "$env:OUT\check-manager.txt"
+          In-Package $provider "--check-manager `"$manager`""
+          $deadline = (Get-Date).AddSeconds(30); while (-not (Test-Path $manager) -and (Get-Date) -lt $deadline) { Start-Sleep 1 }
+          Write-Host "WidgetManager.GetDefault(): $(if (Test-Path $manager) { Get-Content $manager } else { '<no answer>' })"
+
+          Write-Host "==> Log a Diff with the app closed, from a provider started with -PreventBreakaway"
+          Stop-App
+          $result = "$env:OUT\open-app.txt"
+          In-Package $provider "--open-app `"$result`" --screen=add"
+          $deadline = (Get-Date).AddSeconds(30); while (-not (Test-Path $result) -and (Get-Date) -lt $deadline) { Start-Sleep 1 }
+          $answer = if (Test-Path $result) { Get-Content $result } else { "<no answer>" }
+          Write-Host "AppLauncher answered: $answer"
+          if ($answer -ne "Launched") { $failures += "Log a Diff answered '$answer'" }
+          $deadline = (Get-Date).AddSeconds(90); while ((App-Processes).Count -eq 0 -and (Get-Date) -lt $deadline) { Start-Sleep 2 }
+          Start-Sleep 10
+          $procs = App-Processes
+          if ($procs.Count -eq 0) { $failures += "No Keep the Diff process appeared after Log a Diff" }
+          foreach ($p in $procs) {
+            $identity = [Proof.Win]::PackageOf([int]$p.ProcessId)
+            Write-Host "app pid $($p.ProcessId): $($p.CommandLine)  identity '$identity'"
+            if ($identity -ne "") { $failures += "The app started by Log a Diff carries package identity '$identity'" }
+          }
+          if (-not ($procs | Where-Object { $_.CommandLine -like '*--screen=add*' })) { $failures += "No app process was started with --screen=add" }
+
+          Write-Host "==> Control: the app started directly inside the package, without the relay"
+          Stop-App
+          In-Package $env:APP_EXE ""
+          $deadline = (Get-Date).AddSeconds(90); while ((App-Processes).Count -eq 0 -and (Get-Date) -lt $deadline) { Start-Sleep 2 }
+          Start-Sleep 5
+          $identities = @(App-Processes | ForEach-Object { [Proof.Win]::PackageOf([int]$_.ProcessId) })
+          Write-Host "control identities: $($identities -join ' | ')"
+          if (-not ($identities | Where-Object { $_ -like "$env:PACKAGE_NAME*" })) { $failures += "Control: an app started without the relay shows no package identity either, so the check above cannot tell them apart" }
+          Stop-App
+
+          if ($failures) { $failures | ForEach-Object { Write-Host "::error::$_" }; exit 1 }
+          Write-Host "ok: Log a Diff starts the app with --screen=add outside the widget package, and the control shows the difference is real"
+
+      - name: Dump the cards from the installed provider
+        shell: pwsh
+        env:
+          WIDGET_DIR: ${{ steps.app.outputs.widget }}
+        run: |
+          $provider = Join-Path $env:WIDGET_DIR "KeepTheDiffWidgetProvider.exe"
+          $cards = "$env:OUT\cards"
+          $cases = @{ "installed-app" = "$env:LOCALAPPDATA\KeepTheDiff"; "setup" = "$env:RUNNER_TEMP\no-widget-json" }
+          Get-ChildItem android/desktop/windows-widget/fixtures -Directory | ForEach-Object { $cases[$_.Name] = $_.FullName }
+          foreach ($name in $cases.Keys) {
+            $p = Start-Process $provider -ArgumentList "--dump-cards", "`"$($cases[$name])`"", "`"$cards\$name`"" -Wait -PassThru
+            if ($p.ExitCode -ne 0) { throw "--dump-cards $name exited $($p.ExitCode)" }
+            foreach ($w in "ThisWeek", "Goal", "LogADiff") {
+              foreach ($kind in "template", "data") {
+                $file = "$cards\$name\$w.$kind.json"
+                if (-not (Test-Path $file)) { throw "No $file" }
+                $null = Get-Content $file -Raw | ConvertFrom-Json
+              }
+            }
+            Write-Host "${name}: This Week is '$(((Get-Content "$cards\$name\ThisWeek.data.json" -Raw) | ConvertFrom-Json).state)'"
+          }
+          # The app on this runner is free, so its own widget.json must say Premium unlocks the widget.
+          $state = ((Get-Content "$cards\installed-app\ThisWeek.data.json" -Raw) | ConvertFrom-Json).state
+          if ($state -ne "free") { throw "The installed free app's This Week card is '$state', not 'free'" }
+
+      - name: Draw the cards
+        shell: pwsh
+        run: |
+          $tools = "$env:RUNNER_TEMP\render"
+          New-Item -ItemType Directory -Force -Path $tools | Out-Null
+          Copy-Item android/desktop/windows-widget/tools/render-cards.mjs $tools
+          Push-Location $tools
+          npm init -y | Out-Null
+          npm install --no-audit --no-fund adaptivecards@3 adaptivecards-templating@2 adaptive-expressions@4 playwright@1 | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "npm install failed" }
+          $env:CHROMIUM_PATH = "${env:ProgramFiles}\Google\Chrome\Application\chrome.exe"
+          node render-cards.mjs "$env:OUT\cards" "$env:OUT\png"
+          $code = $LASTEXITCODE
+          Pop-Location
+          if ($code -ne 0) { throw "The renderer reported problems" }
+
+      - name: Run the widget tests on Windows
+        working-directory: android
+        shell: pwsh
+        env:
+          KTD_WIDGET_PACKAGE_DIR: ${{ steps.app.outputs.widget }}
+        run: |
+          ./gradlew.bat :desktop:test --tests "*WidgetSnapshotWriterTest*" --tests "*WidgetPackageRegistrationTest*" --no-daemon --console=plain
+          if ($LASTEXITCODE -ne 0) { throw "Widget tests failed on Windows" }
+          Get-ChildItem desktop/build/test-results/test -Filter "*Widget*.xml" | ForEach-Object {
+            [xml]$r = Get-Content $_.FullName
+            Write-Host "$($r.testsuite.name): $($r.testsuite.tests) tests, $($r.testsuite.skipped) skipped, $($r.testsuite.failures) failures"
+            if ([int]$r.testsuite.skipped -gt 0 -and $r.testsuite.name -like '*Registration*') { throw "The Windows registration test skipped itself" }
+          }
+
+      - name: Uninstall the app, then remove the package
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          Get-Process "Keep the Diff", KeepTheDiffWidgetProvider -ErrorAction SilentlyContinue | Stop-Process -Force
+          $entry = Get-ItemProperty 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*', 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*' -ErrorAction SilentlyContinue |
+            Where-Object { $_.DisplayName -like '*Keep the Diff*' -and $_.UninstallString } | Select-Object -First 1
+          if (-not $entry) { throw "No uninstall entry for Keep the Diff" }
+          $product = [regex]::Match($entry.UninstallString, '\{[0-9A-Fa-f-]+\}').Value
+          $p = Start-Process msiexec.exe -ArgumentList "/x", $product, "/quiet", "/norestart" -Wait -PassThru
+          Write-Host "app uninstall exit code: $($p.ExitCode)"
+          $left = Get-AppxPackage -Name $env:PACKAGE_NAME
+          Write-Host "after the app's uninstall, the widget package is $(if ($left) { 'STILL registered (expected: jpackage runs no uninstall action)' } else { 'gone' })"
+          "after app uninstall: $(if ($left) { $left.PackageFullName } else { 'not registered' })" | Out-File "$env:OUT\uninstall.txt"
+          if ($left) { Remove-AppxPackage -Package $left.PackageFullName }
+          if (Get-AppxPackage -Name $env:PACKAGE_NAME) { throw "Remove-AppxPackage left the package registered" }
+          $stillActivates = $true
+          try { [void][Activator]::CreateInstance([Type]::GetTypeFromCLSID([Guid]$env:CLSID)) } catch { $stillActivates = $false; Write-Host "after removal, activation fails: $($_.Exception.Message)" }
+          if ($stillActivates) { throw "The provider class still activates after the package was removed" }
+          "after Remove-AppxPackage: not registered, class does not activate" | Out-File "$env:OUT\uninstall.txt" -Append
+          Write-Host "ok: removed"
+
+      - name: Collect logs
+        if: always()
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path $env:OUT | Out-Null
+          Copy-Item "$env:LOCALAPPDATA\KeepTheDiff\widget-registration.log" $env:OUT -ErrorAction SilentlyContinue
+          Get-WinEvent -LogName Application -MaxEvents 60 -ErrorAction SilentlyContinue | Select-Object TimeCreated, ProviderName, Id, Message |
+            Format-List | Out-File "$env:OUT\application-log.txt"
+          Get-WinEvent -LogName Microsoft-Windows-AppXDeploymentServer/Operational -MaxEvents 60 -ErrorAction SilentlyContinue |
+            Select-Object TimeCreated, Id, Message | Format-List | Out-File "$env:OUT\appx-deployment-log.txt"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        if: always()
+        with:
+          name: windows-widget-proof
+          path: widget-proof/
