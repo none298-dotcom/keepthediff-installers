@@ -46,7 +46,7 @@ jobs:
     env:
       AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
       AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
-      SOURCE_REF: ${{ inputs.source_ref || 'scratch/windows-widget-ci' }}
+      SOURCE_REF: ${{ inputs.source_ref || 'main' }}
       PUBLISHER: "CN=Little Bird Trading LLC, O=Little Bird Trading LLC, L=Newark, S=Delaware, C=US"
       PACKAGE_NAME: LittleBirdTradingLLC.KeepTheDiff.Widgets
       CLSID: 98FFD35F-CACC-4217-AFEC-532DE6491746
