@@ -31,50 +31,39 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      - name: How long does the board stay open, and what is in the picker
+      - name: What closes the board
         shell: powershell
         run: |
           $ErrorActionPreference = "Stop"
           . ./scripts/board.ps1
           Start-Board $env:OUT
-          [void](Clear-Intruders)
 
-          # The standalone Global.WidgetPicker window opens but is EMPTY (run 35492105520): a frame
-          # with one nameless pane and nothing in it. The picker only exists inside the board, so
-          # the board has to stay open long enough to use it. This measures whether it does.
-          for ($round = 1; $round -le 3; $round++) {
-            "=== round $round ==="
-            if (-not (Ensure-Board)) { "the board did not open at all"; continue }
-            $board = Get-BoardWindow
-            if ($board) { Save-WindowShot $board.Handle "round$round-at-once" | Out-Null }
-            foreach ($t in 2, 5, 10, 20, 40) {
-              Start-Sleep ($t - $(if ($t -eq 2) { 0 } else { 0 }))
+          function Front {
+            $h = [Board]::GetForegroundWindow()
+            $w = [Board]::Tops() | Where-Object { $_.Handle -eq $h } | Select-Object -First 1
+            if (-not $w) { return "handle $h (not a visible top-level window)" }
+            $n = try { (Get-Process -Id $w.Pid -ErrorAction Stop).ProcessName } catch { "gone" }
+            return "$n [$($w.Class)] '$($w.Title)'"
+          }
+
+          # The board is opened three ways and watched frame by frame each time, because it survived
+          # for minutes in run 35490986353 and for under two seconds in 35492267682, and the
+          # difference has to be something on this desktop taking the foreground away from it.
+          foreach ($pause in 0, 35) {
+            "=== after clearing the desktop, waiting $pause s before opening ==="
+            [void](Clear-Intruders)
+            Start-Sleep $pause
+            "foreground before: $(Front)"
+            $pkg = Get-AppxPackage -Name MicrosoftWindows.Client.WebExperience
+            "activate: $([Activator2]::Activate("$($pkg.PackageFamilyName)!Widgets"))"
+            $seen = $false
+            for ($i = 0; $i -lt 40; $i++) {
+              Start-Sleep -Milliseconds 250
               $w = Get-BoardWindow
-              "  +$t s: the board is $(if ($w) { "open (handle $($w.Handle))" } else { 'GONE' })"
-              if (-not $w) { break }
+              if ($w) { $seen = $true }
+              "  $([int]($i * 250))ms board=$(if ($w) { 'open' } else { 'no' })  front=$(Front)"
+              if ($seen -and -not $w) { break }
             }
-          }
-
-          if (-not (Ensure-Board)) { throw "The board would not stay open long enough to use" }
-          $board = Get-BoardWindow
-          Save-WindowShot $board.Handle "board" -Required | Out-Null
-          Save-Tree "board" | Out-Null
-          $add = @(Find-Elements "Add widgets" | Where-Object { "$($_.Current.ControlType.ProgrammaticName)" -match 'Button' })[0]
-          if (-not $add) { throw "No 'Add widgets' button" }
-          "the add button: $(Show-Element $add)"
-          "pressed through: $(Press-Element $add)"
-          Start-Sleep 4
-          [Board]::Windows() | Write-Host
-          foreach ($w in [Board]::Tops()) {
-            if (($w.Rect.Right - $w.Rect.Left) -lt 250 -or ($w.Rect.Bottom - $w.Rect.Top) -lt 250) { continue }
-            $name = try { (Get-Process -Id $w.Pid -ErrorAction Stop).ProcessName } catch { "gone" }
-            Save-WindowShot $w.Handle "picker-$name-$($w.Handle)" | Out-Null
-          }
-          Save-Tree "picker" | Out-Null
-          foreach ($word in "Add widgets", "Search", "Weather", "Pin", "Traffic", "Sports", "Watchlist") {
-            $hits = @(Find-Elements $word)
-            "named like '$word': $($hits.Count)"
-            $hits | Select-Object -First 14 | ForEach-Object { "  " + (Show-Element $_) }
           }
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
