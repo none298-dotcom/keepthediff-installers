@@ -482,9 +482,10 @@ function Find-One([string] $Text, [string] $Type = "") {
 # Asks the board's window for its accessibility root, which is what makes a WebView2 publish one.
 function Wake-Accessibility {
   $woken = 0
-  foreach ($w in @(Get-BoardContentWindow, Get-PickerWindow)) {
-    if ($w) { $woken += [Board]::WakeAccessibility($w.Handle) }
-  }
+  $windows = New-Object System.Collections.Generic.List[object]
+  $b = Get-BoardContentWindow; if ($b) { $windows.Add($b) }
+  $p = Get-PickerWindow;       if ($p) { $windows.Add($p) }
+  foreach ($w in $windows) { $woken += [Board]::WakeAccessibility($w.Handle) }
   return $woken
 }
 
