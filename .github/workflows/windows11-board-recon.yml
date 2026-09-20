@@ -47,7 +47,16 @@ jobs:
           "the add button: $(Show-Element $add)"
           "pressed through: $(Press-Element $add)"
           Start-Sleep 6
-          Save-BoardShot "picker" | Out-Null
+          $picker = Get-PickerWindow
+          if ($picker) { "the picker is its own window: handle $($picker.Handle) [$($picker.Class)] $($picker.Rect.Right - $picker.Rect.Left)x$($picker.Rect.Bottom - $picker.Rect.Top)" }
+          else { "no picker window appeared" }
+          $bmp = Get-PickerImage
+          if ($bmp) {
+            $bmp.Save((Join-Path $env:OUT "02-picker-window.png"), [System.Drawing.Imaging.ImageFormat]::Png)
+            "picker window: $($bmp.Width)x$($bmp.Height), $(Measure-Colours $bmp) colours"
+            $bmp.Dispose()
+          }
+          Save-BoardShot "board-behind-the-picker" | Out-Null
           Save-Tree "picker" | Out-Null
           foreach ($word in "Add widgets", "Search", "Weather", "Pin", "Traffic", "Sports", "Watchlist", "Done") {
             $hits = @(Find-Elements $word)

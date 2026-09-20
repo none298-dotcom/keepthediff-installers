@@ -353,6 +353,12 @@ function Save-Tree([string] $Name) {
     $out.Add("  $($w.Handle) $who [$($w.Class)] '$($w.Title)' ${wide}x${high} visible=$($w.Visible)")
   }
   $out.Add("")
+  $picker = Get-PickerRoot
+  if ($picker) {
+    $out.Add("=== UI Automation, from the widget picker's own window ===")
+    foreach ($l in (Get-Tree $picker 0 40)) { $out.Add($l) }
+    $out.Add("")
+  }
   $out.Add("=== UI Automation, from the board's content window ===")
   $root = Get-BoardRoot
   if (-not $root) { $out.Add("no board content window to read") }
@@ -380,6 +386,16 @@ function Get-BoardContentWindow {
   } | Select-Object -First 1
 }
 
+function Get-PickerWindow {
+  [Board]::Tops($false) | Where-Object { $_.Class -eq "XamlWidgetPickerIsland" } | Select-Object -First 1
+}
+
+function Get-PickerRoot {
+  $w = Get-PickerWindow
+  if (-not $w) { return $null }
+  try { return [System.Windows.Automation.AutomationElement]::FromHandle($w.Handle) } catch { return $null }
+}
+
 function Get-BoardRoot {
   $w = Get-BoardContentWindow
   if (-not $w) { return $null }
@@ -389,8 +405,8 @@ function Get-BoardRoot {
 # Every element under $Root whose name contains $Text. With no root, the board's content window.
 function Find-Elements([string] $Text, $Root = $null) {
   $found = New-Object System.Collections.Generic.List[object]
-  if (-not $Root) { $Root = Get-BoardRoot }
-  if (-not $Root) { return $found }
+  $roots = if ($Root) { @($Root) } else { @(Get-PickerRoot, Get-BoardRoot | Where-Object { $_ }) }
+  if ($roots.Count -eq 0) { return $found }
   function Walk($e, $depth) {
     if ($depth -gt 40) { return }
     try { $n = $e.Current.Name } catch { $n = "" }
@@ -400,7 +416,7 @@ function Find-Elements([string] $Text, $Root = $null) {
       while ($c) { Walk $c ($depth + 1); $c = [System.Windows.Automation.TreeWalker]::ControlViewWalker.GetNextSibling($c) }
     } catch {}
   }
-  Walk $Root 0
+  foreach ($r in $roots) { Walk $r 0 }
   return $found
 }
 
@@ -593,11 +609,11 @@ function Test-BoardOpen { return [bool](Get-BoardRoot) }
 # capture that never fills in is reported rather than saved as a blank rectangle with a confident
 # name. The window is nudged on screen without activation between attempts, because a WebView2 that
 # believes it is hidden eventually stops drawing.
-function Get-BoardImage([int] $Tries = 25) {
+function Get-RetryImage([scriptblock] $Window, [int] $Tries = 25) {
   $best = $null; $bestColours = 0; $used = 0
   for ($i = 1; $i -le $Tries; $i++) {
     $used = $i
-    $w = Get-BoardContentWindow
+    $w = & $Window
     if (-not $w) { Start-Sleep 2; continue }
     if (-not $w.Visible) { [void][Board]::ShowWindow($w.Handle, 8) }   # SW_SHOWNA
     $bmp = Get-WindowImage $w.Handle
@@ -611,9 +627,12 @@ function Get-BoardImage([int] $Tries = 25) {
     }
     Start-Sleep 2
   }
-  Write-Host "the board drew $bestColours colours, on attempt $used of $Tries"
+  Write-Host "drew $bestColours colours, on attempt $used of $Tries"
   return $best
 }
+
+function Get-BoardImage([int] $Tries = 25) { return Get-RetryImage { Get-BoardContentWindow } $Tries }
+function Get-PickerImage([int] $Tries = 25) { return Get-RetryImage { Get-PickerWindow } $Tries }
 
 function Wait-BoardPainted([int] $Tries = 25) {
   $bmp = Get-BoardImage $Tries
