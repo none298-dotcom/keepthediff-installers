@@ -30,6 +30,12 @@ using System.Runtime.InteropServices;
 using System.Text;
 public class Board {
   [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
+  [DllImport("user32.dll")] public static extern bool GetCursorPos(out POINT p);
+  [DllImport("user32.dll")] public static extern IntPtr WindowFromPoint(POINT p);
+  [DllImport("user32.dll")] public static extern int SendInput(uint n, INPUT[] inputs, int size);
+  [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X, Y; }
+  [StructLayout(LayoutKind.Sequential)] public struct MOUSEINPUT { public int dx, dy; public uint mouseData, dwFlags, time; public IntPtr dwExtraInfo; }
+  [StructLayout(LayoutKind.Sequential)] public struct INPUT { public uint type; public MOUSEINPUT mi; public int pad1, pad2; }
   [DllImport("user32.dll")] public static extern void mouse_event(uint f, uint x, uint y, uint d, IntPtr e);
   [DllImport("user32.dll")] public static extern void keybd_event(byte vk, byte scan, uint flags, IntPtr extra);
   [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
@@ -285,14 +291,23 @@ function Send-Key([byte] $Vk, [byte[]] $Modifiers = @()) {
   foreach ($m in $Modifiers) { [Board]::keybd_event($m, 0, 2, [IntPtr]::Zero) }
 }
 
+# A click says where the pointer ENDED UP and what window is under it, because "clicked 256,136"
+# was printed by the run that dismissed the board, and the one thing it did not establish was
+# whether the pointer was at 256,136 at the time.
 function Click-At([int] $X, [int] $Y) {
   [void][Board]::SetCursorPos($X, $Y)
-  Start-Sleep -Milliseconds 250
+  Start-Sleep -Milliseconds 300
+  $p = New-Object Board+POINT
+  [void][Board]::GetCursorPos([ref] $p)
+  $under = [Board]::WindowFromPoint($p)
+  $w = [Board]::Tops() | Where-Object { $_.Handle -eq $under } | Select-Object -First 1
+  $what = if ($w) { "[$($w.Class)] '$($w.Title)'" } else { "child window $under" }
+  Write-Host "pointer asked for $X,$Y, is at $($p.X),$($p.Y), over $what"
+  if ($p.X -ne $X -or $p.Y -ne $Y) { throw "The pointer did not go where it was sent: this session will not take mouse input at coordinates" }
   [Board]::mouse_event(2, 0, 0, 0, [IntPtr]::Zero)   # left down
   Start-Sleep -Milliseconds 90
   [Board]::mouse_event(4, 0, 0, 0, [IntPtr]::Zero)   # left up
   Start-Sleep -Milliseconds 900
-  Write-Host "clicked $X,$Y"
 }
 
 function Click-Element($e) {

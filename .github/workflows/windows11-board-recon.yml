@@ -91,27 +91,58 @@ jobs:
           }
           if (-not $route) { Write-Host "::warning::The board did not open by either route" }
 
-      - name: Does a synthetic click reach the board, and what is in the picker
+      # The run before this one clicked the board's add button and the board VANISHED: no picker, no
+      # dashboard window, nothing. Two explanations fit, and they need different fixes, so both are
+      # measured here. Either the pointer never went where it was sent and the press landed on the
+      # transparent margin, which light-dismisses the board; or the board dismisses on any synthetic
+      # press and the accessibility API is the only way in.
+      - name: Where does the pointer actually go
         shell: powershell
+        continue-on-error: true
         run: |
           $ErrorActionPreference = "Stop"
           . ./scripts/board.ps1
           Start-Board $env:OUT
           $script:BoardShot = 30
-          if (-not (Test-BoardOpen)) { [void](Open-Board 60) }
+          # A plain Win32 dialog is the control: if its Cancel button closes it, the pointer works
+          # and anything the board does differently is the board's own behaviour.
+          $dialog = [Board]::Tops() | Where-Object { $_.Title -eq "Performance Options" } | Select-Object -First 1
+          if ($dialog) {
+            $cancel = Find-Elements "Cancel" | Select-Object -First 1
+            if ($cancel) {
+              "control: $(Show-Element $cancel)"
+              Click-Element $cancel
+              $still = [Board]::Tops() | Where-Object { $_.Handle -eq $dialog.Handle }
+              "after the click the dialog is $(if ($still) { 'STILL OPEN: the pointer does not work' } else { 'closed: the pointer works' })"
+            }
+          } else { "no Performance Options dialog to use as a control" }
+
+      - name: Open the picker through the accessibility API instead
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          . ./scripts/board.ps1
+          Start-Board $env:OUT
+          $script:BoardShot = 40
+          [void](Clear-Intruders)
+          $route = Open-Board 60
+          "opened via '$route'"
           $board = Get-BoardWindow
           if (-not $board) { throw "The board is not open" }
+          Save-WindowShot $board.Handle "board-before" | Out-Null
 
-          $add = Wait-Element "Add widgets" 20
+          $add = @(Find-Elements "Add widgets" | Where-Object { $_.Current.ControlType.ProgrammaticName -match 'Button' }) | Select-Object -First 1
           if (-not $add) { throw "No 'Add widgets' button in the board" }
           "the add button: $(Show-Element $add)"
-          Click-Element $add
-          Start-Sleep 6
-          Save-WindowShot $board.Handle "after-clicking-add" | Out-Null
-          [Board]::Windows() | Write-Host
-          Save-Tree "picker" | Out-Null
+          $how = Press-Element $add
+          "pressed it through: $how"
 
-          # Whatever the picker turned out to be, photograph every window big enough to be it.
+          for ($i = 1; $i -le 8; $i++) {
+            Start-Sleep 3
+            $tops = @([Board]::Tops() | Where-Object { ($_.Rect.Right - $_.Rect.Left) -gt 300 -and ($_.Rect.Bottom - $_.Rect.Top) -gt 300 })
+            "t+$($i * 3)s: $(($tops | ForEach-Object { "[$($_.Class)]$($_.Title)" }) -join '  ')"
+          }
+          Save-Tree "picker" | Out-Null
           foreach ($w in [Board]::Tops()) {
             if (($w.Rect.Right - $w.Rect.Left) -lt 300 -or ($w.Rect.Bottom - $w.Rect.Top) -lt 300) { continue }
             $name = try { (Get-Process -Id $w.Pid -ErrorAction Stop).ProcessName } catch { "gone" }
