@@ -33,22 +33,37 @@ public class Board {
   [DllImport("user32.dll")] public static extern void mouse_event(uint f, uint x, uint y, uint d, IntPtr e);
   [DllImport("user32.dll")] public static extern void keybd_event(byte vk, byte scan, uint flags, IntPtr extra);
   [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
-  [DllImport("user32.dll")] public static extern int GetWindowTextW(IntPtr h, StringBuilder s, int n);
-  [DllImport("user32.dll")] public static extern int GetClassNameW(IntPtr h, StringBuilder s, int n);
+  // CharSet MUST be Unicode on every one of these. Without it the marshaller hands a W function an
+  // ANSI buffer and reads UTF-16 back as ANSI, so every title in the first recon run came back as a
+  // single letter and the window list said nothing.
+  [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetWindowTextW(IntPtr h, StringBuilder s, int n);
+  [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetClassNameW(IntPtr h, StringBuilder s, int n);
   [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
   [DllImport("user32.dll")] public static extern bool EnumWindows(EnumProc f, IntPtr p);
   [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+  [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
+  [DllImport("user32.dll")] public static extern IntPtr PostMessageW(IntPtr h, uint msg, IntPtr w, IntPtr l);
+  [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
   public delegate bool EnumProc(IntPtr h, IntPtr p);
-  public static string Windows() {
-    var sb = new StringBuilder();
+  public class Top { public IntPtr Handle; public uint Pid; public string Class; public string Title; public RECT Rect; }
+  public static System.Collections.Generic.List<Top> Tops() {
+    var list = new System.Collections.Generic.List<Top>();
     EnumWindows((h, p) => {
       if (!IsWindowVisible(h)) return true;
       var t = new StringBuilder(512); GetWindowTextW(h, t, 512);
       var c = new StringBuilder(512); GetClassNameW(h, c, 512);
       uint pid; GetWindowThreadProcessId(h, out pid);
-      if (t.Length > 0 || c.Length > 0) sb.AppendLine(string.Format("{0,-12} pid {1,-8} [{2}] {3}", h.ToString(), pid, c, t));
+      RECT r; GetWindowRect(h, out r);
+      list.Add(new Top { Handle = h, Pid = pid, Class = c.ToString(), Title = t.ToString(), Rect = r });
       return true;
     }, IntPtr.Zero);
+    return list;
+  }
+  public static string Windows() {
+    var sb = new StringBuilder();
+    foreach (var w in Tops())
+      sb.AppendLine(string.Format("{0,-10} pid {1,-7} {2,4},{3,-4} {4,4}x{5,-4} [{6}] {7}",
+        w.Handle, w.Pid, w.Rect.Left, w.Rect.Top, w.Rect.Right - w.Rect.Left, w.Rect.Bottom - w.Rect.Top, w.Class, w.Title));
     return sb.ToString();
   }
 }
@@ -81,6 +96,39 @@ function Save-Shot([string] $Name) {
   $bmp.Dispose()
   Write-Host "shot: $file"
   return $file
+}
+
+# WHAT WAS IN FRONT OF EVERYTHING
+# The first recon run found this image parked on the Windows out-of-box privacy page ("Choose
+# privacy settings for your device"), a full-screen window titled "Microsoft account", with a
+# leftover "System Properties" paging-file dialog behind it. The desktop, the taskbar, explorer and
+# the Widgets processes were all alive underneath; the OOBE page simply covered them and took the
+# input. So the first thing any run does is clear the windows that are not this machine's work.
+#
+# Nothing here is clicked. Answering the privacy page would mean choosing settings on somebody
+# else's behalf, and its buttons are in a XAML island this tree cannot even see. The window's
+# process is ended instead, which on an ephemeral runner costs nothing.
+function Clear-Intruders {
+  $closed = 0
+  foreach ($w in [Board]::Tops()) {
+    $name = try { (Get-Process -Id $w.Pid -ErrorAction Stop).ProcessName } catch { "<gone>" }
+    $isOobe = $w.Class -eq "Windows.UI.Core.CoreWindow" -and $name -in @("WWAHost", "CloudExperienceHostBroker", "SystemSettings", "UserOOBEBroker")
+    $isOobe = $isOobe -or $w.Title -eq "Microsoft account" -or $name -in @("WWAHost", "FirstLogonAnim", "OOBENetworkCaptivePortal")
+    $isStray = $w.Title -in @("System Properties", "Windows Setup")
+    if (-not ($isOobe -or $isStray)) { continue }
+    Write-Host "in the way: [$($w.Class)] '$($w.Title)' from $name (pid $($w.Pid)) -- closing it"
+    [void][Board]::PostMessageW($w.Handle, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero)   # WM_CLOSE
+    Start-Sleep 2
+    if (-not (Get-Process -Id $w.Pid -ErrorAction SilentlyContinue)) { $closed++; continue }
+    if ([Board]::Tops() | Where-Object { $_.Handle -eq $w.Handle }) {
+      Stop-Process -Id $w.Pid -Force -ErrorAction SilentlyContinue
+      Start-Sleep 2
+    }
+    $closed++
+  }
+  if ($closed -eq 0) { Write-Host "nothing was covering the desktop" }
+  Start-Sleep 3
+  return $closed
 }
 
 # A screen with one colour in it is a screen that is not being composed. Everything after this
@@ -212,3 +260,46 @@ function Press-Element($e) {
 }
 
 $VK_LWIN = 0x5B; $VK_W = 0x57; $VK_ESCAPE = 0x1B; $VK_RETURN = 0x0D; $VK_TAB = 0x09
+
+# ── The board ─────────────────────────────────────────────────────────────────
+#
+# Win+W is what a person presses, so it is tried first and it is the one the screenshots are of.
+# The board's own app entry is the fallback, and which route opened it is printed, because
+# "the board opened" and "the shortcut works" are two different claims.
+function Open-Board([int] $Seconds = 40) {
+  if (Test-BoardOpen) { return "already open" }
+  Send-Key $VK_W @($VK_LWIN)
+  if (Wait-BoardOpen ($Seconds / 2)) { return "Win+W" }
+  Write-Host "Win+W did not open it; trying the board's own app entry"
+  $pkg = Get-AppxPackage -Name MicrosoftWindows.Client.WebExperience
+  Start-Process "explorer.exe" "shell:AppsFolder\$($pkg.PackageFamilyName)!Widgets"
+  if (Wait-BoardOpen ($Seconds / 2)) { return "shell:AppsFolder" }
+  return ""
+}
+
+function Get-BoardWindow {
+  [Board]::Tops() | Where-Object {
+    $name = try { (Get-Process -Id $_.Pid -ErrorAction Stop).ProcessName } catch { "" }
+    $name -in @("Widgets", "WidgetBoard") -and ($_.Rect.Right - $_.Rect.Left) -gt 200 -and ($_.Rect.Bottom - $_.Rect.Top) -gt 200
+  } | Select-Object -First 1
+}
+
+function Test-BoardOpen { return [bool](Get-BoardWindow) }
+
+function Wait-BoardOpen([int] $Seconds = 20) {
+  $deadline = (Get-Date).AddSeconds($Seconds)
+  while ((Get-Date) -lt $deadline) {
+    $w = Get-BoardWindow
+    if ($w) {
+      Write-Host "board window: [$($w.Class)] '$($w.Title)' at $($w.Rect.Left),$($w.Rect.Top) $($w.Rect.Right - $w.Rect.Left)x$($w.Rect.Bottom - $w.Rect.Top)"
+      Start-Sleep 4    # let it finish animating in before anything is looked at or clicked
+      return $true
+    }
+    Start-Sleep 1
+  }
+  return $false
+}
+
+function Close-Board {
+  if (Test-BoardOpen) { Send-Key $VK_ESCAPE; Start-Sleep 3 }
+}
