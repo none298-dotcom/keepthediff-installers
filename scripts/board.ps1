@@ -605,19 +605,34 @@ function Wait-BoardPainted([int] $Seconds = 90) {
 #
 # So the board is activated once, allowed to load, and then read and photographed in the state it
 # puts itself into anyway. It is never activated a second time: that would only blank it again.
-function Wait-BoardHidden([int] $Seconds = 60) {
-  $deadline = (Get-Date).AddSeconds($Seconds)
-  while ((Get-Date) -lt $deadline) {
+# The board needs BOTH states, in this order:
+#
+#   ON SCREEN, to render at all. A WebView2 whose window is hidden stops drawing, and run
+#   35493820623 caught a board that dismissed itself within a second of activation and then never
+#   painted anything in ninety seconds of waiting.
+#
+#   HIDDEN, to be read back. While it is on screen PrintWindow returns a blank rectangle, because
+#   nothing on this desktop presents to a framebuffer; hidden, it is composed offscreen and
+#   PrintWindow draws it in full (run 35493065526).
+#
+# So it is held on screen while it loads, without being activated again, and only then hidden.
+function Warm-Board([int] $Seconds = 30) {
+  $held = 0
+  for ($t = 0; $t -lt $Seconds; $t += 2) {
     $w = Get-BoardContentWindow
-    if ($w -and -not $w.Visible) { Write-Host "the board has dismissed itself, which is when it becomes readable"; return $true }
+    if (-not $w) { Start-Sleep 2; continue }
+    if (-not $w.Visible) {
+      # SW_SHOWNA: on screen, so it renders, without taking the activation it cannot have anyway.
+      [void][Board]::ShowWindow($w.Handle, 8)
+      $host_ = Get-BoardWindow
+      $held++
+    }
     Start-Sleep 2
   }
+  Write-Host "held the board on screen for $Seconds s ($held nudges) so it could draw"
   $w = Get-BoardContentWindow
-  if (-not $w) { return $false }
-  Write-Host "the board stayed on screen for $Seconds s, so it is being hidden from here instead"
-  [void][Board]::ShowWindow($w.Handle, 0)   # SW_HIDE
+  if ($w) { [void][Board]::ShowWindow($w.Handle, 0) }   # SW_HIDE, which is what makes it readable
   Start-Sleep 3
-  return $true
 }
 
 function Wait-BoardOpen([int] $Seconds = 60) {
@@ -626,8 +641,8 @@ function Wait-BoardOpen([int] $Seconds = 60) {
     $w = Get-BoardContentWindow
     if ($w) {
       Write-Host "board content: handle $($w.Handle), $($w.Rect.Right - $w.Rect.Left)x$($w.Rect.Bottom - $w.Rect.Top), on screen: $($w.Visible)"
-      if (-not (Wait-BoardHidden 60)) { return $false }
-      if (-not (Wait-BoardPainted 90)) { return $false }
+      Warm-Board 30
+      if (-not (Wait-BoardPainted 60)) { return $false }
       return [bool](Get-BoardRoot)
     }
     Start-Sleep -Milliseconds 400
