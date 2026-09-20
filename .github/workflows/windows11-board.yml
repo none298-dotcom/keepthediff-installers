@@ -231,6 +231,52 @@ jobs:
           Copy-Item "$env:SHIP\ready\*" "${{ steps.app.outputs.data }}" -Force
           Get-Content "${{ steps.app.outputs.data }}\widget.json" | Write-Host
 
+      # DOES THE OPERATING SYSTEM SEE THE WIDGETS, separately from whether the board offers them.
+      # Run 35495916012 got all the way to a loaded picker that listed six widgets, none of them
+      # Keep the Diff's. That has two very different causes and this tells them apart: if the
+      # AppExtension catalog does not hold the extension, the package or its manifest is the
+      # problem; if it does, the board is not picking it up and the board is the problem.
+      - name: Ask Windows what widget providers it knows about
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          Add-Type -AssemblyName System.Runtime.WindowsRuntime
+          $asTask = ([System.WindowsRuntimeSystemExtensions].GetMethods() | Where-Object {
+            $_.Name -eq 'AsTask' -and $_.GetParameters().Count -eq 1 -and $_.GetParameters()[0].ParameterType.Name -eq 'IAsyncOperation`1' })[0]
+          function Await($operation, $type) {
+            $task = $asTask.MakeGenericMethod($type).Invoke($null, @($operation))
+            [void]$task.Wait(-1)
+            return $task.Result
+          }
+          [void][Windows.ApplicationModel.AppExtensions.AppExtensionCatalog, Windows.ApplicationModel, ContentType = WindowsRuntime]
+          $catalog = [Windows.ApplicationModel.AppExtensions.AppExtensionCatalog]::Open("com.microsoft.windows.widgets")
+          $type = [System.Collections.Generic.IReadOnlyList[Windows.ApplicationModel.AppExtensions.AppExtension]]
+          $extensions = Await $catalog.FindAllAsync() $type
+          "the AppExtension catalog for com.microsoft.windows.widgets holds $($extensions.Count):"
+          $found = $false
+          foreach ($e in $extensions) {
+            "  '$($e.DisplayName)'  id '$($e.Id)'  $($e.Package.Id.FamilyName)  $($e.Package.Id.Architecture)"
+            if ($e.Package.Id.Name -eq $env:PACKAGE_NAME) { $found = $true }
+          }
+          New-Item -ItemType Directory -Force -Path $env:OUT | Out-Null
+          ($extensions | ForEach-Object { "$($_.DisplayName)`t$($_.Package.Id.FamilyName)`t$($_.Package.Id.Architecture)" }) |
+            Out-File "$env:OUT\widget-providers-windows-knows-about.txt"
+          if (-not $found) { Write-Host "::error::Windows does not list $env:PACKAGE_NAME as a widget provider at all" }
+          else { Write-Host "Windows lists Keep the Diff's widgets, so anything missing from the picker is the board's own doing" }
+
+      # The board enumerates its providers when its host starts, and this one has been running since
+      # the machine booted, which was before the app existed. Ending it makes the next activation
+      # build the list again. Only the UI host: ending WidgetService with it left nothing that would
+      # come back (run 35491820930).
+      - name: Restart the board's host so it sees a provider installed after it started
+        shell: powershell
+        run: |
+          Get-Process Widgets -ErrorAction SilentlyContinue | ForEach-Object {
+            Write-Host "ending Widgets (pid $($_.Id))"
+            Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue
+          }
+          Start-Sleep 15
+
       - name: Pin the three widgets and photograph the board
         shell: powershell
         env:

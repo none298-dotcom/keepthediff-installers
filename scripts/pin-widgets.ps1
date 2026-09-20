@@ -53,6 +53,10 @@ if ($bmp) {
 $listed = @(Find-Elements "" (Get-PickerRoot) | Where-Object { "$($_.Current.ControlType.ProgrammaticName)" -match 'ListItem' } |
   ForEach-Object { $_.Current.Name })
 Write-Host "the picker lists: $($listed -join ' | ')"
+($listed -join "`n") | Out-File (Join-Path $OutDir "what-the-picker-lists.txt")
+if (-not ($listed | Where-Object { $Widgets -contains $_ })) {
+  Fail "The widget picker does not list any of $($Widgets -join ', '): the board is not offering this provider"
+}
 
 # ── Pin each one ─────────────────────────────────────────────────────────────
 $pinned = New-Object System.Collections.Generic.List[string]
@@ -60,7 +64,7 @@ foreach ($widget in $Widgets) {
   Write-Host "=== pinning '$widget' ==="
   $root = Get-PickerRoot
   if (-not $root) { Fail "The picker closed before '$widget' could be pinned"; break }
-  $item = @(Find-Elements $widget $root | Where-Object { "$($_.Current.ControlType.ProgrammaticName)" -match 'ListItem' })[0]
+  $item = Find-Elements $widget $root | Where-Object { "$($_.Current.ControlType.ProgrammaticName)" -match 'ListItem' } | Select-Object -First 1
   if (-not $item) { Fail "'$widget' is not listed in the widget picker"; continue }
   Write-Host "  picker entry: $(Show-Element $item)"
   try { $item.GetCurrentPattern([System.Windows.Automation.ScrollItemPattern]::Pattern).ScrollIntoView() } catch {}
@@ -75,7 +79,7 @@ foreach ($widget in $Widgets) {
     $bmp.Dispose()
   }
 
-  $pin = @(Find-Elements "Pin" (Get-PickerRoot) | Where-Object { "$($_.Current.ControlType.ProgrammaticName)" -match 'Button' })[0]
+  $pin = Find-Elements "Pin" (Get-PickerRoot) | Where-Object { "$($_.Current.ControlType.ProgrammaticName)" -match 'Button' } | Select-Object -First 1
   if (-not $pin) { Fail "The picker offers no Pin button for '$widget'"; continue }
   try { [void](Press-Element $pin) } catch { Fail "Pin would not press for '$widget': $($_.Exception.Message)"; continue }
   Start-Sleep 6
@@ -84,7 +88,7 @@ foreach ($widget in $Widgets) {
 }
 
 # ── The board with the cards on it ───────────────────────────────────────────
-$close = @(Find-Elements "Close" (Get-PickerRoot) | Where-Object { "$($_.Current.ControlType.ProgrammaticName)" -match 'Button' })[0]
+$close = Find-Elements "Close" (Get-PickerRoot) | Where-Object { "$($_.Current.ControlType.ProgrammaticName)" -match 'Button' } | Select-Object -First 1
 if ($close) { try { [void](Press-Element $close) } catch {} }
 Start-Sleep 8
 
@@ -93,9 +97,9 @@ Save-BoardShot "board-with-the-widgets-pinned" | Out-Null
 Save-Tree "board-after" | Out-Null
 
 foreach ($widget in $pinned) {
-  $card = @(Find-Elements $widget (Get-BoardRoot) | Where-Object {
+  $card = Find-Elements $widget (Get-BoardRoot) | Where-Object {
     "$($_.Current.ControlType.ProgrammaticName)" -match 'Group' -and $_.Current.BoundingRectangle.Height -gt 60
-  })[0]
+  } | Select-Object -First 1
   if (-not $card) { Fail "'$widget' was pinned but no card of that name is on the board"; continue }
   Write-Host "card: $(Show-Element $card)"
   if (-not (Save-ElementShot $card ("card-" + ($widget -replace '[^A-Za-z0-9]', '')))) {
@@ -111,7 +115,7 @@ if ($AppExe -and $pinned -contains "Log a Diff") {
   function AppProcesses { @(Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -eq $AppExe }) }
   if ((AppProcesses).Count -ne 0) { Fail "Keep the Diff was already running, so a launch would prove nothing" }
   else {
-    $card = @(Find-Elements "Log a Diff" (Get-BoardRoot))[0]
+    $card = Find-Elements "Log a Diff" (Get-BoardRoot) | Select-Object -First 1
     if (-not $card) { Fail "No Log a Diff card to click" }
     else {
       try { [void](Press-Element $card) } catch { Fail "The Log a Diff card would not press: $($_.Exception.Message)" }
