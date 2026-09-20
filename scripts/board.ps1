@@ -344,25 +344,52 @@ function Get-Tree([System.Windows.Automation.AutomationElement] $Root, [int] $De
 function Save-Tree([string] $Name) {
   $file = Join-Path $script:BoardOut "tree-$Name.txt"
   $out = New-Object System.Collections.Generic.List[string]
-  $out.Add("=== top-level windows ===")
-  $out.Add([Board]::Windows())
-  $out.Add("=== UI Automation, desktop down ===")
-  try {
-    $root = [System.Windows.Automation.AutomationElement]::RootElement
-    $child = [System.Windows.Automation.TreeWalker]::ControlViewWalker.GetFirstChild($root)
-    while ($child) {
-      foreach ($l in (Get-Tree $child 0 40)) { $out.Add($l) }
-      $child = [System.Windows.Automation.TreeWalker]::ControlViewWalker.GetNextSibling($child)
-    }
-  } catch { $out.Add("UI Automation failed: $($_.Exception.Message)") }
+  $out.Add("=== top-level windows, hidden ones included ===")
+  foreach ($w in [Board]::Tops($false)) {
+    if (($w.Rect.Right - $w.Rect.Left) -lt 200) { continue }
+    $who = try { (Get-Process -Id $w.Pid -ErrorAction Stop).ProcessName } catch { "gone" }
+    $out.Add(("  {0} {1} [{2}] '{3}' {4}x{5} visible={6}" -f $w.Handle, $who, $w.Class, $w.Title,
+      $w.Rect.Right - $w.Rect.Left, $w.Rect.Bottom - $w.Rect.Top, $w.Visible))
+  }
+  $out.Add("")
+  $out.Add("=== UI Automation, from the board's content window ===")
+  $root = Get-BoardRoot
+  if (-not $root) { $out.Add("no board content window to read") }
+  else { foreach ($l in (Get-Tree $root 0 40)) { $out.Add($l) } }
   $out | Out-File $file -Encoding utf8
   Write-Host "tree: $file ($($out.Count) lines)"
   return $file
 }
 
-# Every element anywhere on the desktop whose name contains $Text.
-function Find-Elements([string] $Text) {
+# WHERE THE BOARD IS READ FROM, and why it is not the desktop root.
+#
+# The board dismisses itself here because it never gets the foreground, and it cannot be given it:
+# SetForegroundWindow fails even with the current owner's input queue attached, because this session
+# has never received an input event to hand out. Ending the out-of-box host that held it only moved
+# the foreground on to the next shell surface.
+#
+# But a dismissed board is HIDDEN, not destroyed (run 35493065526). Its WebView2 content window
+# survives, keeps rendering, and PrintWindow draws it in full. What a hidden window is missing is a
+# place in the walk from the desktop root, which is why "Add widgets" could not be found there.
+# AutomationElement.FromHandle reaches it anyway, so everything below starts from that handle.
+function Get-BoardContentWindow {
+  [Board]::Tops($false) | Where-Object {
+    $_.Class -eq "Chrome_WidgetWin_1" -and $_.Title -eq "Widgets" -and
+    ($_.Rect.Right - $_.Rect.Left) -gt 400 -and ($_.Rect.Bottom - $_.Rect.Top) -gt 400
+  } | Select-Object -First 1
+}
+
+function Get-BoardRoot {
+  $w = Get-BoardContentWindow
+  if (-not $w) { return $null }
+  try { return [System.Windows.Automation.AutomationElement]::FromHandle($w.Handle) } catch { return $null }
+}
+
+# Every element under $Root whose name contains $Text. With no root, the board's content window.
+function Find-Elements([string] $Text, $Root = $null) {
   $found = New-Object System.Collections.Generic.List[object]
+  if (-not $Root) { $Root = Get-BoardRoot }
+  if (-not $Root) { return $found }
   function Walk($e, $depth) {
     if ($depth -gt 40) { return }
     try { $n = $e.Current.Name } catch { $n = "" }
@@ -372,17 +399,24 @@ function Find-Elements([string] $Text) {
       while ($c) { Walk $c ($depth + 1); $c = [System.Windows.Automation.TreeWalker]::ControlViewWalker.GetNextSibling($c) }
     } catch {}
   }
-  $root = [System.Windows.Automation.AutomationElement]::RootElement
-  $child = [System.Windows.Automation.TreeWalker]::ControlViewWalker.GetFirstChild($root)
-  while ($child) { Walk $child 0; $child = [System.Windows.Automation.TreeWalker]::ControlViewWalker.GetNextSibling($child) }
+  Walk $Root 0
   return $found
 }
 
-function Wait-Element([string] $Text, [int] $Seconds = 30) {
+# The first element that is named like $Text AND whose control type matches $Type, which matters
+# because the board names a card's Group, its Button and its Image all the same thing.
+function Find-One([string] $Text, [string] $Type = "") {
+  $hits = @(Find-Elements $Text)
+  if ($Type) { $hits = @($hits | Where-Object { "$($_.Current.ControlType.ProgrammaticName)" -match $Type }) }
+  if ($hits.Count -eq 0) { return $null }
+  return $hits[0]
+}
+
+function Wait-Element([string] $Text, [int] $Seconds = 30, [string] $Type = "") {
   $deadline = (Get-Date).AddSeconds($Seconds)
   while ((Get-Date) -lt $deadline) {
-    $hits = @(Find-Elements $Text)
-    if ($hits.Count -gt 0) { return $hits[0] }
+    $hit = Find-One $Text $Type
+    if ($hit) { return $hit }
     Start-Sleep -Milliseconds 700
   }
   return $null
@@ -491,6 +525,38 @@ function Open-Board([int] $Tries = 3, [int] $Seconds = 60) {
   return ""
 }
 
+# A single element, cut out of the capture of the window it lives in. This is how one card gets a
+# picture of its own without anything being cropped by hand afterwards.
+function Save-ElementShot($e, [string] $Name, [int] $Pad = 8) {
+  $w = Get-BoardContentWindow
+  if (-not $w) { Write-Host "no board content window, so no shot of $Name"; return $null }
+  $bmp = Get-WindowImage $w.Handle
+  if (-not $bmp) { Write-Host "the board content window would not draw for $Name"; return $null }
+  try {
+    $r = $e.Current.BoundingRectangle
+    $frame = New-Object Board+RECT
+    if ([Board]::DwmGetWindowAttribute($w.Handle, 9, [ref] $frame, 16) -ne 0) { [void][Board]::GetWindowRect($w.Handle, [ref] $frame) }
+    $x = [Math]::Max(0, [int]$r.X - $frame.Left - $Pad)
+    $y = [Math]::Max(0, [int]$r.Y - $frame.Top - $Pad)
+    $wide = [Math]::Min($bmp.Width - $x, [int]$r.Width + 2 * $Pad)
+    $high = [Math]::Min($bmp.Height - $y, [int]$r.Height + 2 * $Pad)
+    if ($wide -le 0 -or $high -le 0) { Write-Host "'$Name' has no rectangle inside the board"; return $null }
+    $crop = $bmp.Clone((New-Object System.Drawing.Rectangle $x, $y, $wide, $high), $bmp.PixelFormat)
+    $script:BoardShot++
+    $file = Join-Path $script:BoardOut ("{0:d2}-{1}.png" -f $script:BoardShot, $Name)
+    $crop.Save($file, [System.Drawing.Imaging.ImageFormat]::Png)
+    Write-Host "shot: $file  $($crop.Width)x$($crop.Height), $(Measure-Colours $crop) colours"
+    $crop.Dispose()
+    return $file
+  } finally { $bmp.Dispose() }
+}
+
+function Save-BoardShot([string] $Name, [switch] $Required) {
+  $w = Get-BoardContentWindow
+  if (-not $w) { if ($Required) { throw "There is no board content window to photograph for '$Name'" }; return $null }
+  return Save-WindowShot $w.Handle $Name -Required:$Required
+}
+
 function Get-BoardWindow {
   [Board]::Tops() | Where-Object {
     $name = try { (Get-Process -Id $_.Pid -ErrorAction Stop).ProcessName } catch { "" }
@@ -498,41 +564,33 @@ function Get-BoardWindow {
   } | Select-Object -First 1
 }
 
-function Test-BoardOpen { return [bool](Get-BoardWindow) }
+# "Open" here means the board's content window exists and UI Automation can read it, which is what
+# every step below actually needs. Whether it is on screen is a separate question, and one this
+# session cannot answer in the board's favour.
+function Test-BoardOpen { return [bool](Get-BoardRoot) }
 
 function Wait-BoardOpen([int] $Seconds = 20) {
   $deadline = (Get-Date).AddSeconds($Seconds)
   while ((Get-Date) -lt $deadline) {
-    $w = Get-BoardWindow
+    $w = Get-BoardContentWindow
     if ($w) {
-      # Hand it the foreground in the same breath as noticing it. Waiting even half a second is
-      # too long: it dismisses itself as soon as it sees it is not the active window.
-      $held = [Board]::ForceForeground($w.Handle)
-      Write-Host "board window: [$($w.Class)] at $($w.Rect.Left),$($w.Rect.Top) $($w.Rect.Right - $w.Rect.Left)x$($w.Rect.Bottom - $w.Rect.Top); foreground: $held"
-      Start-Sleep -Milliseconds 1200   # it animates in
-      return [bool](Get-BoardWindow)
+      [void][Board]::ForceForeground($w.Handle)
+      Write-Host "board content: handle $($w.Handle), $($w.Rect.Right - $w.Rect.Left)x$($w.Rect.Bottom - $w.Rect.Top), on screen: $($w.Visible)"
+      # It needs a moment to finish laying out; the window survives being dismissed, so unlike the
+      # host window there is no hurry here.
+      Start-Sleep 5
+      return [bool](Get-BoardRoot)
     }
-    Start-Sleep -Milliseconds 120
+    Start-Sleep -Milliseconds 400
   }
   return $false
 }
 
-# The board dismisses itself, sometimes seconds after opening and sometimes not for minutes, and
-# nothing here can press Escape or click it back. So every step that needs it asks for it again
-# rather than assuming the last one left it there, and the last resort ends only the board's own UI
-# host: ending WidgetService with it (run 35491820930) left nothing that would come back.
 function Ensure-Board {
   if (Test-BoardOpen) { return $true }
-  if (Open-Board 2 30) { return $true }
-  Write-Host "the board will not reopen; ending only the board's UI host and trying again"
-  Get-Process Widgets -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-  Start-Sleep 10
   return [bool](Open-Board 3 60)
 }
 
-# Keeps the board in front for as long as a block of work takes. It cannot force foreground (this
-# session refuses that as it refuses injected input), but asking costs nothing and the board stays
-# put more often with it than without.
 function Poke-Board {
   $w = Get-BoardWindow
   if ($w) { [void][Board]::SetForegroundWindow($w.Handle) }
