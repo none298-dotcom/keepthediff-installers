@@ -91,6 +91,43 @@ public class Board {
     SendInput(3, inputs, Marshal.SizeOf(typeof(INPUT)));
   }
   [DllImport("user32.dll")] public static extern int GetSystemMetrics(int index);
+  [DllImport("user32.dll")] public static extern bool AttachThreadInput(uint from, uint to, bool attach);
+  [DllImport("user32.dll")] public static extern bool BringWindowToTop(IntPtr h);
+  [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int cmd);
+  [DllImport("user32.dll")] public static extern bool AllowSetForegroundWindow(int pid);
+  [DllImport("user32.dll")] public static extern bool LockSetForegroundWindow(uint action);
+  [DllImport("user32.dll")] public static extern bool SystemParametersInfoW(uint action, uint param, IntPtr value, uint winIni);
+
+  // The foreground on this desktop is a hidden window that never changes hands (run 35492353965),
+  // so the board opens, finds it is not the active window, and dismisses itself inside 500 ms.
+  // Unlocking the foreground and borrowing the current owner's input queue is the documented way
+  // to hand it over.
+  public static string Describe(IntPtr h) {
+    if (h == IntPtr.Zero) return "<none>";
+    var t = new StringBuilder(512); GetWindowTextW(h, t, 512);
+    var c = new StringBuilder(512); GetClassNameW(h, c, 512);
+    uint pid; GetWindowThreadProcessId(h, out pid);
+    string name; try { name = System.Diagnostics.Process.GetProcessById((int)pid).ProcessName; } catch { name = "?"; }
+    return string.Format("{0} (pid {1}) [{2}] '{3}'{4}", name, pid, c, t, IsWindowVisible(h) ? "" : " HIDDEN");
+  }
+  public static void UnlockForeground() {
+    LockSetForegroundWindow(2);                       // LSFW_UNLOCK
+    SystemParametersInfoW(0x2001, 0, IntPtr.Zero, 3); // SPI_SETFOREGROUNDLOCKTIMEOUT = 0
+    AllowSetForegroundWindow(-1);                     // ASFW_ANY
+  }
+  public static bool ForceForeground(IntPtr h) {
+    UnlockForeground();
+    uint other; GetWindowThreadProcessId(GetForegroundWindow(), out other);
+    uint otherThread = GetWindowThreadProcessId(GetForegroundWindow(), out other);
+    uint mine = GetCurrentThreadId();
+    AttachThreadInput(mine, otherThread, true);
+    ShowWindow(h, 5);                                 // SW_SHOW
+    BringWindowToTop(h);
+    bool ok = SetForegroundWindow(h);
+    SetActiveWindow(h);
+    AttachThreadInput(mine, otherThread, false);
+    return ok && GetForegroundWindow() == h;
+  }
   [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
   public delegate bool EnumProc(IntPtr h, IntPtr p);
   public class Top { public IntPtr Handle; public uint Pid; public string Class; public string Title; public RECT Rect; }
@@ -430,6 +467,7 @@ function Open-Board([int] $Tries = 3, [int] $Seconds = 60) {
   foreach ($id in "Widgets", "Global.WidgetBoard") {
     for ($i = 1; $i -le $Tries; $i++) {
       $aumid = "$($pkg.PackageFamilyName)!$id"
+      [Board]::UnlockForeground()
       Write-Host "activating $aumid (attempt $i): $([Activator2]::Activate($aumid))"
       if (Wait-BoardOpen $Seconds) { return "ActivateApplication ...!$id (attempt $i)" }
       Write-Host "  no board yet; running: $((Get-Process Widgets, WidgetService, WidgetBoard, msedgewebview2 -ErrorAction SilentlyContinue | ForEach-Object { $_.ProcessName }) -join ', ')"
@@ -452,11 +490,14 @@ function Wait-BoardOpen([int] $Seconds = 20) {
   while ((Get-Date) -lt $deadline) {
     $w = Get-BoardWindow
     if ($w) {
-      Write-Host "board window: [$($w.Class)] '$($w.Title)' at $($w.Rect.Left),$($w.Rect.Top) $($w.Rect.Right - $w.Rect.Left)x$($w.Rect.Bottom - $w.Rect.Top)"
-      Start-Sleep -Milliseconds 1500   # it animates in; longer than this and it may be gone again
-      return $true
+      # Hand it the foreground in the same breath as noticing it. Waiting even half a second is
+      # too long: it dismisses itself as soon as it sees it is not the active window.
+      $held = [Board]::ForceForeground($w.Handle)
+      Write-Host "board window: [$($w.Class)] at $($w.Rect.Left),$($w.Rect.Top) $($w.Rect.Right - $w.Rect.Left)x$($w.Rect.Bottom - $w.Rect.Top); foreground: $held"
+      Start-Sleep -Milliseconds 1200   # it animates in
+      return [bool](Get-BoardWindow)
     }
-    Start-Sleep -Milliseconds 400
+    Start-Sleep -Milliseconds 120
   }
   return $false
 }
