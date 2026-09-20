@@ -51,13 +51,11 @@ jobs:
           "activate: $([Activator2]::Activate("$($pkg.PackageFamilyName)!Widgets"))"
           Start-Sleep 6
 
-          foreach ($label in "after it has gone") {
-            "=== $label: every top-level window, hidden ones included ==="
-            foreach ($w in [Board]::Tops($false)) {
-              if (($w.Rect.Right - $w.Rect.Left) -lt 200 -or ($w.Rect.Bottom - $w.Rect.Top) -lt 200) { continue }
-              $name = try { (Get-Process -Id $w.Pid -ErrorAction Stop).ProcessName } catch { "gone" }
-              "  $($w.Handle) $name [$($w.Class)] '$($w.Title)' $($w.Rect.Right - $w.Rect.Left)x$($w.Rect.Bottom - $w.Rect.Top) visible=$($w.Visible)"
-            }
+          "=== after it has gone: every top-level window, hidden ones included ==="
+          foreach ($w in [Board]::Tops($false)) {
+            if (($w.Rect.Right - $w.Rect.Left) -lt 200 -or ($w.Rect.Bottom - $w.Rect.Top) -lt 200) { continue }
+            $name = try { (Get-Process -Id $w.Pid -ErrorAction Stop).ProcessName } catch { "gone" }
+            "  $($w.Handle) $name [$($w.Class)] '$($w.Title)' $($w.Rect.Right - $w.Rect.Left)x$($w.Rect.Bottom - $w.Rect.Top) visible=$($w.Visible)"
           }
 
           "=== can the hidden ones still be photographed and read ==="
