@@ -532,8 +532,8 @@ function Open-Board([int] $Tries = 3, [int] $Seconds = 60) {
 function Save-ElementShot($e, [string] $Name, [int] $Pad = 8) {
   $w = Get-BoardContentWindow
   if (-not $w) { Write-Host "no board content window, so no shot of $Name"; return $null }
-  $bmp = Get-WindowImage $w.Handle
-  if (-not $bmp) { Write-Host "the board content window would not draw for $Name"; return $null }
+  $bmp = Get-BoardImage
+  if (-not $bmp) { Write-Host "the board would not draw for $Name"; return $null }
   try {
     $r = $e.Current.BoundingRectangle
     $frame = New-Object Board+RECT
@@ -554,9 +554,20 @@ function Save-ElementShot($e, [string] $Name, [int] $Pad = 8) {
 }
 
 function Save-BoardShot([string] $Name, [switch] $Required) {
-  $w = Get-BoardContentWindow
-  if (-not $w) { if ($Required) { throw "There is no board content window to photograph for '$Name'" }; return $null }
-  return Save-WindowShot $w.Handle $Name -Required:$Required
+  $bmp = Get-BoardImage
+  if (-not $bmp) {
+    if ($Required) { throw "The board would not draw for '$Name'" }
+    Write-Host "no image for $Name"
+    return $null
+  }
+  $colours = Measure-Colours $bmp
+  $script:BoardShot++
+  $file = Join-Path $script:BoardOut ("{0:d2}-{1}.png" -f $script:BoardShot, $Name)
+  $bmp.Save($file, [System.Drawing.Imaging.ImageFormat]::Png)
+  Write-Host "shot: $file  $($bmp.Width)x$($bmp.Height), $colours colours"
+  $bmp.Dispose()
+  if ($Required -and $colours -lt 200) { throw "'$Name' captured as $colours colours, which is a blank rectangle, not a screenshot" }
+  return $file
 }
 
 function Get-BoardWindow {
@@ -571,68 +582,45 @@ function Get-BoardWindow {
 # session cannot answer in the board's favour.
 function Test-BoardOpen { return [bool](Get-BoardRoot) }
 
-# WAIT FOR PIXELS, NOT FOR A CLOCK.
-# A fixed sleep after activation produced a blank 800x696 capture in run 35493573613 and a fully
-# drawn board in the run before it, purely on timing. The board is ready when its window draws
-# something, so that is what is waited for, and a capture that never fills in is reported as such
-# instead of being saved as a white rectangle with a confident name.
-function Wait-BoardPainted([int] $Seconds = 90) {
-  $deadline = (Get-Date).AddSeconds($Seconds)
-  $best = 0
-  while ((Get-Date) -lt $deadline) {
-    $w = Get-BoardContentWindow
-    if ($w) {
-      $bmp = Get-WindowImage $w.Handle
-      if ($bmp) {
-        $colours = Measure-Colours $bmp
-        $bmp.Dispose()
-        if ($colours -gt $best) { $best = $colours }
-        if ($colours -ge 50) { Write-Host "the board has drawn: $colours colours"; return $true }
-      }
-    }
-    Start-Sleep 2
-  }
-  Write-Host "the board never drew more than $best colours in $Seconds s"
-  return $false
-}
-
-# THE ONE COUNTER-INTUITIVE THING ABOUT THIS RUNNER
-# While the board's content window is ON SCREEN, PrintWindow returns a blank rectangle, for ninety
-# seconds straight (run 35493656024). The instant the board dismissed itself and the window went
-# hidden, the same call returned a fully drawn board, and activating it again blanked it once more.
-# Nothing presents to this desktop's framebuffer, so a visible window has nowhere to draw that can
-# be read back, while a hidden one is composed into an offscreen surface that PrintWindow can.
+# HOW THE BOARD IS PHOTOGRAPHED, and why it is a loop
 #
-# So the board is activated once, allowed to load, and then read and photographed in the state it
-# puts itself into anyway. It is never activated a second time: that would only blank it again.
-# The board needs BOTH states, in this order:
+# PrintWindow against the board's content window is intermittent on this runner. Two calls a
+# fraction of a second apart returned 2109 colours and then 1 colour (run 35493656024), and in
+# other runs it returned a fully drawn board on the first try. Nothing on this desktop presents to
+# a framebuffer, and the offscreen surface the call reads is not always there to be read.
 #
-#   ON SCREEN, to render at all. A WebView2 whose window is hidden stops drawing, and run
-#   35493820623 caught a board that dismissed itself within a second of activation and then never
-#   painted anything in ninety seconds of waiting.
-#
-#   HIDDEN, to be read back. While it is on screen PrintWindow returns a blank rectangle, because
-#   nothing on this desktop presents to a framebuffer; hidden, it is composed offscreen and
-#   PrintWindow draws it in full (run 35493065526).
-#
-# So it is held on screen while it loads, without being activated again, and only then hidden.
-function Warm-Board([int] $Seconds = 30) {
-  $held = 0
-  for ($t = 0; $t -lt $Seconds; $t += 2) {
+# So a capture is attempted until it produces something, the best frame seen is kept, and a
+# capture that never fills in is reported rather than saved as a blank rectangle with a confident
+# name. The window is nudged on screen without activation between attempts, because a WebView2 that
+# believes it is hidden eventually stops drawing.
+function Get-BoardImage([int] $Tries = 25) {
+  $best = $null; $bestColours = 0; $used = 0
+  for ($i = 1; $i -le $Tries; $i++) {
+    $used = $i
     $w = Get-BoardContentWindow
     if (-not $w) { Start-Sleep 2; continue }
-    if (-not $w.Visible) {
-      # SW_SHOWNA: on screen, so it renders, without taking the activation it cannot have anyway.
-      [void][Board]::ShowWindow($w.Handle, 8)
-      $host_ = Get-BoardWindow
-      $held++
+    if (-not $w.Visible) { [void][Board]::ShowWindow($w.Handle, 8) }   # SW_SHOWNA
+    $bmp = Get-WindowImage $w.Handle
+    if ($bmp) {
+      $colours = Measure-Colours $bmp
+      if ($colours -gt $bestColours) {
+        if ($best) { $best.Dispose() }
+        $best = $bmp; $bestColours = $colours
+      } else { $bmp.Dispose() }
+      if ($bestColours -ge 200) { break }
     }
     Start-Sleep 2
   }
-  Write-Host "held the board on screen for $Seconds s ($held nudges) so it could draw"
-  $w = Get-BoardContentWindow
-  if ($w) { [void][Board]::ShowWindow($w.Handle, 0) }   # SW_HIDE, which is what makes it readable
-  Start-Sleep 3
+  Write-Host "the board drew $bestColours colours, on attempt $used of $Tries"
+  return $best
+}
+
+function Wait-BoardPainted([int] $Tries = 25) {
+  $bmp = Get-BoardImage $Tries
+  if (-not $bmp) { return $false }
+  $ok = (Measure-Colours $bmp) -ge 200
+  $bmp.Dispose()
+  return $ok
 }
 
 function Wait-BoardOpen([int] $Seconds = 60) {
@@ -641,8 +629,7 @@ function Wait-BoardOpen([int] $Seconds = 60) {
     $w = Get-BoardContentWindow
     if ($w) {
       Write-Host "board content: handle $($w.Handle), $($w.Rect.Right - $w.Rect.Left)x$($w.Rect.Bottom - $w.Rect.Top), on screen: $($w.Visible)"
-      Warm-Board 30
-      if (-not (Wait-BoardPainted 60)) { return $false }
+      if (-not (Wait-BoardPainted 25)) { return $false }
       return [bool](Get-BoardRoot)
     }
     Start-Sleep -Milliseconds 400
