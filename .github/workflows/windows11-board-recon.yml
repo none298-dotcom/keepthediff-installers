@@ -1,0 +1,131 @@
+# Can the Windows 11 ARM runner's session actually be driven, and does the Widgets Board open?
+#
+# The earlier probe (windows11-board-probe.yml) found the board's own packages installed on this
+# image: MicrosoftWindows.Client.WebExperience and Microsoft.WidgetsPlatformRuntime, with explorer
+# running and a 1024x768 virtual screen. This asks the next questions, which are the ones that
+# decide whether the widgets can be seen: does the screen compose, does synthetic input reach the
+# shell, does Win+W open the board, and what does the board's UI Automation tree call things.
+#
+# It builds nothing. It exists to be read, once, so that the real workflow clicks named elements
+# instead of guessed coordinates.
+name: Windows 11 board recon
+
+on:
+  workflow_dispatch:
+
+jobs:
+  recon:
+    runs-on: windows-11-arm
+    timeout-minutes: 25
+    env:
+      OUT: ${{ github.workspace }}\board-recon
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Session, shell and toolchain
+        shell: powershell
+        run: |
+          $p = Get-Process -Id $PID
+          "powershell session id : $($p.SessionId)"
+          "window station        : $([System.Environment]::UserInteractive)"
+          "user                  : $env:USERNAME"
+          foreach ($n in "explorer", "ShellExperienceHost", "StartMenuExperienceHost", "Widgets", "WidgetService", "dwm") {
+            $procs = @(Get-Process $n -ErrorAction SilentlyContinue)
+            "$($n.PadRight(24)): $($procs.Count) process(es)$(if ($procs) { ' session ' + ($procs.SessionId -join ',') })"
+          }
+          "--- Windows SDK tools ---"
+          foreach ($tool in "makeappx.exe", "signtool.exe") {
+            $hits = @(Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin" -Recurse -Filter $tool -ErrorAction SilentlyContinue)
+            if ($hits) { $hits | ForEach-Object { "  $($_.FullName)" } } else { "  $tool NOT FOUND" }
+          }
+          "--- dotnet ---"
+          & dotnet --list-sdks
+
+      - name: The board's packages and how they are launched
+        shell: powershell
+        run: |
+          foreach ($name in "MicrosoftWindows.Client.WebExperience", "Microsoft.WidgetsPlatformRuntime") {
+            $pkg = Get-AppxPackage -AllUsers -Name $name -ErrorAction SilentlyContinue
+            if (-not $pkg) { "$name : not installed"; continue }
+            "$name : $($pkg.PackageFullName)  status $($pkg.Status)"
+            "  installed at $($pkg.InstallLocation)"
+            try {
+              $m = Get-AppxPackageManifest -Package $pkg.PackageFullName
+              $m.Package.Applications.Application | ForEach-Object { "  app id '$($_.Id)'  AUMID $($pkg.PackageFamilyName)!$($_.Id)" }
+            } catch { "  manifest unreadable: $($_.Exception.Message)" }
+          }
+          "--- anything named like widgets in Start ---"
+          Get-StartApps | Where-Object { $_.Name -like "*idget*" -or $_.AppID -like "*WebExperience*" } | Format-Table -AutoSize | Out-String
+          "--- taskbar widgets policy ---"
+          foreach ($key in "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced", "HKLM:\SOFTWARE\Policies\Microsoft\Dsh") {
+            $v = Get-ItemProperty $key -ErrorAction SilentlyContinue
+            if ($v) { "$key :"; $v | Format-List | Out-String }
+          }
+
+      - name: Does the screen compose, and does input reach the shell
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          . ./scripts/board.ps1
+          Start-Board $env:OUT
+          Assert-Screen
+          Save-Shot "bare-desktop" | Out-Null
+          Save-Tree "bare-desktop" | Out-Null
+
+          # The Start menu is the cheapest proof that a synthetic Win key reaches the shell. If this
+          # does not open, nothing below is a statement about the Widgets Board.
+          Send-Key $VK_LWIN
+          Start-Sleep 4
+          Save-Shot "after-win-key" | Out-Null
+          $start = @(Find-Elements "Start")
+          "elements named like Start: $($start.Count)"
+          $start | Select-Object -First 6 | ForEach-Object { "  " + (Show-Element $_) }
+          Send-Key $VK_ESCAPE
+          Start-Sleep 2
+
+      - name: Win+W
+        shell: powershell
+        continue-on-error: true
+        run: |
+          $ErrorActionPreference = "Stop"
+          . ./scripts/board.ps1
+          Start-Board $env:OUT
+          $script:BoardShot = 10
+          Send-Key $VK_W @($VK_LWIN)
+          Start-Sleep 8
+          Save-Shot "after-win-w" | Out-Null
+          Save-Tree "after-win-w" | Out-Null
+          foreach ($word in "Widget", "Keep the Diff", "Add widgets", "Dashboard") {
+            $hits = @(Find-Elements $word)
+            "named like '$word': $($hits.Count)"
+            $hits | Select-Object -First 8 | ForEach-Object { "  " + (Show-Element $_) }
+          }
+          Start-Sleep 10
+          Save-Shot "win-w-settled" | Out-Null
+
+      - name: Launching the board's app entry directly
+        shell: powershell
+        continue-on-error: true
+        run: |
+          $ErrorActionPreference = "Stop"
+          . ./scripts/board.ps1
+          Start-Board $env:OUT
+          $script:BoardShot = 20
+          $pkg = Get-AppxPackage -Name MicrosoftWindows.Client.WebExperience
+          $ids = @(( Get-AppxPackageManifest -Package $pkg.PackageFullName ).Package.Applications.Application.Id)
+          foreach ($id in $ids) {
+            $aumid = "$($pkg.PackageFamilyName)!$id"
+            "trying shell:AppsFolder\$aumid"
+            Start-Process "explorer.exe" "shell:AppsFolder\$aumid"
+            Start-Sleep 8
+            Save-Shot ("aumid-" + ($id -replace '[^A-Za-z0-9]', '')) | Out-Null
+            "  windows now:"
+            [Board]::Windows() | Write-Host
+          }
+          Save-Tree "after-aumid" | Out-Null
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        if: always()
+        with:
+          name: board-recon
+          path: board-recon/
