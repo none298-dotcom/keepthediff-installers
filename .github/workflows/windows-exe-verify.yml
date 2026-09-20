@@ -265,18 +265,17 @@ jobs:
           Write-Host "installer: $($exe.FullName)  ($([int]($exe.Length/1MB)) MB)"
           "path=$($exe.FullName)" >> $env:GITHUB_OUTPUT
 
-      # jpackage copies the resources folder as it finds it, so a staging step that silently did
-      # nothing would ship an installer without widgets and nothing else would notice.
-      - name: Assert the widget is inside the app image
+      # The staged folder is what jpackage is handed, so a staging step that silently did nothing is
+      # caught here rather than later as a missing widget nobody can explain. What actually SHIPPED
+      # is asserted after the install, against the installed app.
+      - name: Assert the staged widget is complete
         shell: pwsh
         run: |
-          $widget = Get-ChildItem android/desktop/build/compose/binaries/main/app -Recurse -Directory -Filter widget |
-                    Where-Object { Test-Path (Join-Path $_.FullName "KeepTheDiffWidgets.msix") } | Select-Object -First 1
-          if (-not $widget) { throw "The app image has no resources\widget folder holding KeepTheDiffWidgets.msix" }
-          foreach ($f in "KeepTheDiffWidgetProvider.exe", "Microsoft.Windows.Widgets.dll", "Assets\plus-light.png") {
-            if (-not (Test-Path (Join-Path $widget.FullName $f))) { throw "The app image's widget folder has no $f" }
+          $widget = "android/desktop/resources/windows/widget"
+          foreach ($f in "KeepTheDiffWidgets.msix", "KeepTheDiffWidgetProvider.exe", "Microsoft.Windows.Widgets.dll", "Assets\plus-light.png") {
+            if (-not (Test-Path (Join-Path $widget $f))) { throw "The staged widget folder has no $f" }
           }
-          Write-Host "widget in the app image: $($widget.FullName) ($((Get-ChildItem $widget.FullName -Recurse -File).Count) files)"
+          Write-Host "staged widget: $((Get-ChildItem $widget -Recurse -File).Count) files"
 
       # ── Authenticode signing ──────────────────────────────────────────────
       # Signed with a short-lived certificate Azure mints per run. Authentication is
@@ -382,6 +381,20 @@ jobs:
           if ($p.ExitCode -ne 0 -and $p.ExitCode -ne 3010) {
             throw "Silent install failed with exit code $($p.ExitCode)"
           }
+
+      # THE ONE THAT MATTERS: what the installer actually put on the machine. jpackage copies the
+      # resources folder as it finds it, and an installer shipped without widgets would otherwise be
+      # noticed only by the registration step, which cannot tell "never staged" from "never wired".
+      - name: Assert the widget is inside the installed app
+        shell: pwsh
+        run: |
+          $widget = Get-ChildItem "$env:LOCALAPPDATA\Keep the Diff", "$env:ProgramFiles\Keep the Diff" -Recurse -Directory -Filter widget -ErrorAction SilentlyContinue |
+                    Where-Object { Test-Path (Join-Path $_.FullName "KeepTheDiffWidgets.msix") } | Select-Object -First 1
+          if (-not $widget) { throw "The installed app has no resources\widget folder holding KeepTheDiffWidgets.msix" }
+          foreach ($f in "KeepTheDiffWidgetProvider.exe", "Microsoft.Windows.Widgets.dll", "Assets\plus-light.png") {
+            if (-not (Test-Path (Join-Path $widget.FullName $f))) { throw "The installed widget folder has no $f" }
+          }
+          Write-Host "widget in the installed app: $($widget.FullName) ($((Get-ChildItem $widget.FullName -Recurse -File).Count) files)"
 
       # perUserInstall = true was expected to break both certification checks
       # and broke only one: jpackage wrote the HKLM uninstall entry regardless,
