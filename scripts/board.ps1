@@ -92,6 +92,30 @@ public class Board {
   }
   [DllImport("user32.dll")] public static extern int GetSystemMetrics(int index);
   [DllImport("user32.dll")] public static extern bool AttachThreadInput(uint from, uint to, bool attach);
+  [DllImport("user32.dll")] public static extern IntPtr SendMessageTimeoutW(IntPtr h, uint msg, IntPtr w, IntPtr l, uint flags, uint timeout, out IntPtr result);
+  [DllImport("user32.dll")] public static extern bool EnumChildWindows(IntPtr parent, EnumProc f, IntPtr p);
+
+  // CHROMIUM BUILDS ITS ACCESSIBILITY TREE ON DEMAND.
+  // The board is a WebView2, and until a client asks for the UIA root object its window answers
+  // with a handful of empty panes and no document at all: run 35494968123 photographed a fully
+  // drawn board and then searched a 28-line tree for sixty seconds for a button that is plainly
+  // visible in the picture. WM_GETOBJECT with UiaRootObjectId is the request that turns it on, and
+  // it has to reach the render widget's child windows, not just the top-level one.
+  public static int WakeAccessibility(IntPtr h) {
+    int asked = 0;
+    IntPtr result;
+    foreach (int objectId in new[] { unchecked((int)0xFFFFFFEC), unchecked((int)0xFFFFFFFC) }) {  // UiaRootObjectId, OBJID_CLIENT
+      SendMessageTimeoutW(h, 0x003D, IntPtr.Zero, new IntPtr(objectId), 2, 2000, out result);
+      asked++;
+    }
+    EnumChildWindows(h, (c, p) => {
+      IntPtr r;
+      SendMessageTimeoutW(c, 0x003D, IntPtr.Zero, new IntPtr(unchecked((int)0xFFFFFFEC)), 2, 1000, out r);
+      asked++;
+      return true;
+    }, IntPtr.Zero);
+    return asked;
+  }
   [DllImport("user32.dll")] public static extern bool BringWindowToTop(IntPtr h);
   [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int cmd);
   [DllImport("user32.dll")] public static extern bool AllowSetForegroundWindow(int pid);
@@ -455,12 +479,24 @@ function Find-One([string] $Text, [string] $Type = "") {
   return $hits[0]
 }
 
-function Wait-Element([string] $Text, [int] $Seconds = 30, [string] $Type = "") {
+# Asks the board's window for its accessibility root, which is what makes a WebView2 publish one.
+function Wake-Accessibility {
+  $woken = 0
+  foreach ($w in @(Get-BoardContentWindow, Get-PickerWindow)) {
+    if ($w) { $woken += [Board]::WakeAccessibility($w.Handle) }
+  }
+  return $woken
+}
+
+function Wait-Element([string] $Text, [int] $Seconds = 240, [string] $Type = "") {
   $deadline = (Get-Date).AddSeconds($Seconds)
+  $said = $false
   while ((Get-Date) -lt $deadline) {
     $hit = Find-One $Text $Type
     if ($hit) { return $hit }
-    Start-Sleep -Milliseconds 700
+    $asked = Wake-Accessibility
+    if (-not $said) { Write-Host "waiting for '$Text'; asked $asked windows for an accessibility root"; $said = $true }
+    Start-Sleep 2
   }
   return $null
 }

@@ -31,8 +31,12 @@ Save-BoardShot "board-before-anything-is-pinned" -Required | Out-Null
 Save-Tree "board-before" | Out-Null
 
 # ── Is Keep the Diff in the picker at all ────────────────────────────────────
-$add = Wait-Element "Add widgets" 60 "Button"
-if (-not $add) { throw "The board has no 'Add widgets' button, so the picker cannot be opened" }
+[void](Wake-Accessibility)
+$add = Wait-Element "Add widgets" 240 "Button"
+if (-not $add) {
+  Save-Tree "board-with-no-add-button" | Out-Null
+  throw "The board drew, but four minutes of asking never produced an 'Add widgets' button in its accessibility tree"
+}
 Write-Host "the add button: $(Show-Element $add)"
 [void](Press-Element $add)
 if (-not (Wait-Picker 150)) { throw "The widget picker never finished loading" }
