@@ -91,6 +91,38 @@ jobs:
           }
           if (-not $route) { Write-Host "::warning::The board did not open by either route" }
 
+      - name: Does a synthetic click reach the board, and what is in the picker
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          . ./scripts/board.ps1
+          Start-Board $env:OUT
+          $script:BoardShot = 30
+          if (-not (Test-BoardOpen)) { [void](Open-Board 60) }
+          $board = Get-BoardWindow
+          if (-not $board) { throw "The board is not open" }
+
+          $add = Wait-Element "Add widgets" 20
+          if (-not $add) { throw "No 'Add widgets' button in the board" }
+          "the add button: $(Show-Element $add)"
+          Click-Element $add
+          Start-Sleep 6
+          Save-WindowShot $board.Handle "after-clicking-add" | Out-Null
+          [Board]::Windows() | Write-Host
+          Save-Tree "picker" | Out-Null
+
+          # Whatever the picker turned out to be, photograph every window big enough to be it.
+          foreach ($w in [Board]::Tops()) {
+            if (($w.Rect.Right - $w.Rect.Left) -lt 300 -or ($w.Rect.Bottom - $w.Rect.Top) -lt 300) { continue }
+            $name = try { (Get-Process -Id $w.Pid -ErrorAction Stop).ProcessName } catch { "gone" }
+            Save-WindowShot $w.Handle "window-$name-$($w.Handle)" | Out-Null
+          }
+          foreach ($word in "Add widgets", "Search", "Keep the Diff", "Weather", "Pin") {
+            $hits = @(Find-Elements $word)
+            "named like '$word': $($hits.Count)"
+            $hits | Select-Object -First 14 | ForEach-Object { "  " + (Show-Element $_) }
+          }
+
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         if: always()
         with:
