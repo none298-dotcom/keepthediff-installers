@@ -110,7 +110,7 @@ jobs:
           $ErrorActionPreference = 'Stop'
           Add-Type -AssemblyName System.Drawing, System.Windows.Forms, UIAutomationClient
 
-          foreach ($screen in @('home', 'goals', 'history')) {
+          foreach ($screen in @('home', 'goals', 'history', 'widget')) {
             Write-Host "=== $screen ==="
             # `gradlew run` blocks while the window is open, so it is started detached and killed
             # once the frame is grabbed.
@@ -173,11 +173,23 @@ jobs:
             # long enough for the hover the line above just left to fade out of the frame.
             Start-Sleep -Seconds 8
 
+            # THE WIDGET SHOT IS THE WHOLE DESKTOP, not the app window. The desktop widget window
+            # is 260x300 and opens at the top right of the screen, so a capture of the main window's
+            # own rectangle would not contain it, and 260x300 is far below the Store's floor anyway.
+            # What a shopper needs to see is both windows at once, which is a screen capture.
+            if ($screen -eq 'widget') {
+              $b = [System.Windows.Forms.SystemInformation]::VirtualScreen
+              $bmp = New-Object System.Drawing.Bitmap $b.Width, $b.Height
+              $g = [System.Drawing.Graphics]::FromImage($bmp)
+              $g.CopyFromScreen($b.X, $b.Y, 0, 0, $bmp.Size)
+              $r = $b
+            } else {
             $element = [System.Windows.Automation.AutomationElement]::FromHandle($window.MainWindowHandle)
             $r = $element.Current.BoundingRectangle
             $bmp = New-Object System.Drawing.Bitmap([int]$r.Width), ([int]$r.Height)
             $g = [System.Drawing.Graphics]::FromImage($bmp)
             $g.CopyFromScreen([int]$r.X, [int]$r.Y, 0, 0, $bmp.Size)
+            }
             $bmp.Save("$PWD\shots\$screen.png", [System.Drawing.Imaging.ImageFormat]::Png)
             $g.Dispose(); $bmp.Dispose()
             Write-Host "captured $screen at $([int]$r.Width)x$([int]$r.Height)"
@@ -226,6 +238,7 @@ jobs:
           # 1424x891 is comfortably above the Microsoft Store's 1366x768 floor, which is the only
           # dimension constraint that applies here.
           Add-Type -AssemblyName System.Drawing
+          # 'widget' is deliberately absent: it is a full desktop capture, with nothing to trim.
           foreach ($n in @('home','goals','history')) {
             $path = "$PWD\shots\$n.png"
             $src = [System.Drawing.Image]::FromFile($path)
