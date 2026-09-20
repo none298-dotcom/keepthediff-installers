@@ -31,35 +31,54 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      - name: Open the board, open the picker, and write down what is in them
+      - name: Does the picker have an entry point of its own
         shell: powershell
+        continue-on-error: true
         run: |
           $ErrorActionPreference = "Stop"
           . ./scripts/board.ps1
           Start-Board $env:OUT
           [void](Clear-Intruders)
-          Write-Host "widget processes: $((Get-Process Widgets, WidgetService -ErrorAction SilentlyContinue | ForEach-Object { $_.ProcessName }) -join ', ')"
-          $route = Open-Board
-          "opened via '$route'"
+          $pkg = Get-AppxPackage -Name MicrosoftWindows.Client.WebExperience
+          Start-Process "explorer.exe" "shell:AppsFolder\$($pkg.PackageFamilyName)!Global.WidgetPicker"
+          Start-Sleep 12
+          [Board]::Windows() | Write-Host
+          foreach ($w in [Board]::Tops()) {
+            if (($w.Rect.Right - $w.Rect.Left) -lt 250 -or ($w.Rect.Bottom - $w.Rect.Top) -lt 250) { continue }
+            $name = try { (Get-Process -Id $w.Pid -ErrorAction Stop).ProcessName } catch { "gone" }
+            Save-WindowShot $w.Handle "direct-picker-$name" | Out-Null
+          }
+          Save-Tree "direct-picker" | Out-Null
+
+      - name: Open the board and the picker, photographing as fast as they appear
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          . ./scripts/board.ps1
+          Start-Board $env:OUT
+          $script:BoardShot = 20
+          [void](Clear-Intruders)
+          if (-not (Ensure-Board)) { throw "The board did not open" }
           $board = Get-BoardWindow
-          if (-not $board) { throw "The board did not open" }
           Save-WindowShot $board.Handle "board" -Required | Out-Null
           Save-Tree "board" | Out-Null
+          "still open after the tree: $(Poke-Board)"
 
+          if (-not (Ensure-Board)) { throw "The board closed and would not come back" }
           $add = @(Find-Elements "Add widgets" | Where-Object { "$($_.Current.ControlType.ProgrammaticName)" -match 'Button' })[0]
           if (-not $add) { throw "No 'Add widgets' button" }
           "the add button: $(Show-Element $add)"
           "pressed through: $(Press-Element $add)"
-          Start-Sleep 8
+          Start-Sleep 5
 
           [Board]::Windows() | Write-Host
-          Save-Tree "picker" | Out-Null
           foreach ($w in [Board]::Tops()) {
             if (($w.Rect.Right - $w.Rect.Left) -lt 250 -or ($w.Rect.Bottom - $w.Rect.Top) -lt 250) { continue }
             $name = try { (Get-Process -Id $w.Pid -ErrorAction Stop).ProcessName } catch { "gone" }
             Save-WindowShot $w.Handle "picker-$name-$($w.Handle)" | Out-Null
           }
-          foreach ($word in "Add widgets", "Search", "Weather", "Pin", "Esports", "Traffic", "Sports") {
+          Save-Tree "picker" | Out-Null
+          foreach ($word in "Add widgets", "Search", "Weather", "Pin", "Traffic", "Sports", "Watchlist") {
             $hits = @(Find-Elements $word)
             "named like '$word': $($hits.Count)"
             $hits | Select-Object -First 14 | ForEach-Object { "  " + (Show-Element $_) }

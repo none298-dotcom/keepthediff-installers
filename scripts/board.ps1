@@ -427,12 +427,34 @@ function Wait-BoardOpen([int] $Seconds = 20) {
     $w = Get-BoardWindow
     if ($w) {
       Write-Host "board window: [$($w.Class)] '$($w.Title)' at $($w.Rect.Left),$($w.Rect.Top) $($w.Rect.Right - $w.Rect.Left)x$($w.Rect.Bottom - $w.Rect.Top)"
-      Start-Sleep 4    # let it finish animating in before anything is looked at or clicked
+      Start-Sleep -Milliseconds 1500   # it animates in; longer than this and it may be gone again
       return $true
     }
-    Start-Sleep 1
+    Start-Sleep -Milliseconds 400
   }
   return $false
+}
+
+# The board dismisses itself, sometimes seconds after opening and sometimes not for minutes, and
+# nothing here can press Escape or click it back. So every step that needs it asks for it again
+# rather than assuming the last one left it there, and the last resort ends only the board's own UI
+# host: ending WidgetService with it (run 35491820930) left nothing that would come back.
+function Ensure-Board {
+  if (Test-BoardOpen) { return $true }
+  if (Open-Board 2 30) { return $true }
+  Write-Host "the board will not reopen; ending only the board's UI host and trying again"
+  Get-Process Widgets -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+  Start-Sleep 10
+  return [bool](Open-Board 3 60)
+}
+
+# Keeps the board in front for as long as a block of work takes. It cannot force foreground (this
+# session refuses that as it refuses injected input), but asking costs nothing and the board stays
+# put more often with it than without.
+function Poke-Board {
+  $w = Get-BoardWindow
+  if ($w) { [void][Board]::SetForegroundWindow($w.Handle) }
+  return [bool]$w
 }
 
 # The board caches the set of widget providers it knows about, and a provider registered after it
