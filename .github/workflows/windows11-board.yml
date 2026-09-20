@@ -1,0 +1,254 @@
+# The Windows 11 Widgets Board itself: the picker listing Keep the Diff, the three widgets pinned,
+# the cards drawn by the board, and Log a Diff opening the app from a click on one.
+#
+# This is the half that android/desktop/windows-widget/README.md used to call impossible in CI,
+# because Windows Server has no Widgets Board. The GitHub-hosted `windows-11-arm` image is a CLIENT
+# SKU: Windows 11 Enterprise 26200 on ARM64, with MicrosoftWindows.Client.WebExperience (the board)
+# and Microsoft.WidgetsPlatformRuntime installed, explorer, Widgets.exe and WidgetService.exe all
+# running in an interactive session 2 with a 1024x768 desktop.
+#
+# FOUR THINGS ABOUT THAT RUNNER, each of which cost a run to find. scripts/board.ps1 records which
+# run established which, and what would have faked a pass:
+#  1. It boots parked on the Windows out-of-box privacy page, full screen, over the live desktop,
+#     and its host keeps the FOREGROUND even after that window is closed. The board checks whether
+#     it is the active window and dismisses itself when it is not, so that host is ended first.
+#  2. Nothing presents to the framebuffer. A full-screen grab returns whatever was last pushed to
+#     it: after the out-of-box page closed, the screen still showed it. Screenshots here are
+#     PrintWindow with PW_RENDERFULLCONTENT against a named window, retried until the window draws.
+#  3. Injected input is DROPPED. The pointer arrives at the exact coordinates it is sent to, over
+#     the right window, on the input desktop, and neither mouse_event nor SendInput will close a
+#     plain Win32 dialog's Cancel button. The same button through UI Automation's InvokePattern
+#     closes it at once, so every press here is the accessibility API: a real press of the board's
+#     own control, but not a proof that a pointer could reach it. Win+W does nothing here either.
+#  4. The board therefore dismisses itself within a second or two. It HIDES rather than closing:
+#     its WebView2 content window survives, keeps rendering, and can be read by handle and
+#     photographed. Everything below works on that window whether or not it is on screen.
+#
+# The app is BUILT ON windows-latest and RUN ON the ARM runner, under x64 emulation: that is the
+# shipping build, bit for bit, and building it on ARM would prove something nobody ships.
+name: The Windows 11 Widgets Board
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: "Branch or commit sha of keepthediff to verify"
+        default: "main"
+  pull_request:
+    paths:
+      - .github/workflows/windows11-board.yml
+      - scripts/board.ps1
+
+permissions:
+  contents: read
+  id-token: write     # OIDC for Azure Trusted Signing. Only accepted from main.
+
+env:
+  PUBLISHER: "CN=Little Bird Trading LLC, O=Little Bird Trading LLC, L=Newark, S=Delaware, C=US"
+  PACKAGE_NAME: LittleBirdTradingLLC.KeepTheDiff.Widgets
+
+jobs:
+  # ── 1. The shipping build, on the architecture it ships for ─────────────────
+  build:
+    runs-on: windows-latest
+    env:
+      AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+      AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+      SOURCE_REF: ${{ inputs.source_ref || 'main' }}
+    steps:
+      - name: Check out the private source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: none298-dotcom/keepthediff
+          ref: ${{ env.SOURCE_REF }}
+          ssh-key: ${{ secrets.SOURCE_DEPLOY_KEY }}
+
+      - name: Record which commit is being verified
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path "$env:RUNNER_TEMP\ship" | Out-Null
+          "keepthediff @ $(git rev-parse HEAD) (ref $env:SOURCE_REF)" | Tee-Object "$env:RUNNER_TEMP\ship\provenance.txt"
+
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Build the provider and pack the sparse MSIX
+        shell: pwsh
+        run: ./android/desktop/windows-widget/build.ps1 -OutDir "$env:RUNNER_TEMP\widget-build"
+
+      - name: Azure login (federated, OIDC)
+        id: azure
+        if: ${{ env.AZURE_CLIENT_ID != '' }}
+        continue-on-error: true
+        uses: azure/login@7184910d9eb2b1c5e48f7073824a90609bb9b6d6 # v2
+        with:
+          client-id: ${{ env.AZURE_CLIENT_ID }}
+          tenant-id: ${{ env.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Sign the MSIX (Azure Trusted Signing)
+        if: ${{ steps.azure.outcome == 'success' }}
+        uses: azure/trusted-signing-action@1d365fec12862c4aa68fcac418143d73f0cea293 # v0
+        with:
+          azure-tenant-id: ${{ env.AZURE_TENANT_ID }}
+          azure-client-id: ${{ env.AZURE_CLIENT_ID }}
+          endpoint: https://eus.codesigning.azure.net/
+          trusted-signing-account-name: mlcsigning
+          certificate-profile-name: mlc-public-trust
+          files: ${{ runner.temp }}\widget-build\KeepTheDiffWidgets.msix
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+
+      # Only the PUBLIC certificate travels to the next job, so the ARM runner can trust the
+      # package. The private key never leaves this runner and is never written to the artifact.
+      - name: Sign the MSIX with a CI-only test certificate (not main)
+        if: ${{ steps.azure.outcome != 'success' }}
+        shell: pwsh
+        run: |
+          Write-Host "::warning::Azure signing is not available from this ref, so the MSIX is signed with a throwaway certificate whose subject matches the real one. Only a run from main proves the real certificate."
+          $cert = New-SelfSignedCertificate -Type Custom -Subject $env:PUBLISHER -KeyUsage DigitalSignature `
+            -FriendlyName "Keep the Diff CI test signing" -CertStoreLocation Cert:\CurrentUser\My `
+            -TextExtension @("2.5.29.37={text}1.3.6.1.5.5.7.3.3", "2.5.29.19={text}")
+          Export-Certificate -Cert $cert -FilePath "$env:RUNNER_TEMP\ship\ci-test.cer" | Out-Null
+          $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin" -Recurse -Filter signtool.exe |
+            Where-Object { $_.FullName -match '\\x64\\' } | Sort-Object FullName | Select-Object -Last 1
+          & $signtool.FullName sign /fd SHA256 /sha1 $cert.Thumbprint "$env:RUNNER_TEMP\widget-build\KeepTheDiffWidgets.msix"
+          if ($LASTEXITCODE -ne 0) { throw "signtool failed" }
+
+      - name: Stage the provider and the signed MSIX into the app's resources
+        shell: pwsh
+        run: ./android/desktop/windows-widget/build.ps1 -OutDir "$env:RUNNER_TEMP\widget-build" -Stage
+
+      - name: Build the EXE
+        working-directory: android
+        shell: pwsh
+        run: ./gradlew.bat :desktop:packageExe "-Pdistribution=direct" --no-daemon --console=plain
+
+      - name: Collect what the board job needs
+        shell: pwsh
+        run: |
+          $installer = Get-ChildItem android/desktop/build/compose/binaries/main/exe -Filter *.exe | Select-Object -First 1
+          if (-not $installer) { throw "packageExe produced no installer" }
+          Copy-Item $installer.FullName "$env:RUNNER_TEMP\ship\KeepTheDiff-setup.exe"
+          # The fixture the cards are shown with, and its photo.
+          Copy-Item android/desktop/windows-widget/fixtures/ready "$env:RUNNER_TEMP\ship\ready" -Recurse
+          Write-Host "installer: $([math]::Round($installer.Length / 1MB, 1)) MB"
+          Get-ChildItem "$env:RUNNER_TEMP\ship" -Recurse -File | ForEach-Object { "  $($_.Name)" }
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: shipping-build
+          path: ${{ runner.temp }}\ship
+          retention-days: 3
+
+  # ── 2. The board ────────────────────────────────────────────────────────────
+  board:
+    needs: build
+    runs-on: windows-11-arm
+    timeout-minutes: 45
+    env:
+      OUT: ${{ github.workspace }}\board-proof
+      SHIP: ${{ github.workspace }}\ship
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: shipping-build
+          path: ship
+
+      - name: What this machine is
+        shell: powershell
+        run: |
+          $os = Get-CimInstance Win32_OperatingSystem
+          "$($os.Caption) $($os.Version) build $($os.BuildNumber), $env:PROCESSOR_ARCHITECTURE"
+          Get-Content "$env:SHIP\provenance.txt"
+          foreach ($n in "MicrosoftWindows.Client.WebExperience", "Microsoft.WidgetsPlatformRuntime") {
+            $p = Get-AppxPackage -AllUsers -Name $n
+            "$n : $(if ($p) { "$($p.PackageFullName) status $($p.Status)" } else { 'NOT INSTALLED' })"
+          }
+          foreach ($n in "explorer", "Widgets", "WidgetService", "dwm") {
+            "$($n.PadRight(16)): $(@(Get-Process $n -ErrorAction SilentlyContinue).Count) process(es)"
+          }
+
+      - name: Trust the CI test certificate, if that is what signed the package
+        shell: powershell
+        run: |
+          if (Test-Path "$env:SHIP\ci-test.cer") {
+            Import-Certificate -FilePath "$env:SHIP\ci-test.cer" -CertStoreLocation Cert:\LocalMachine\TrustedPeople | Out-Null
+            Write-Host "imported the CI test certificate: this run does not prove the production certificate"
+          } else {
+            Write-Host "no CI certificate in the artifact, so the package carries the real Trusted Signing certificate"
+          }
+
+      - name: Install the app and let it register its widgets
+        id: app
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          if (Get-AppxPackage -Name $env:PACKAGE_NAME) { throw "The widget package was registered before the app was installed, so this run proves nothing about the app" }
+          $p = Start-Process "$env:SHIP\KeepTheDiff-setup.exe" -ArgumentList '/quiet' -Wait -PassThru
+          if ($p.ExitCode -ne 0 -and $p.ExitCode -ne 3010) { throw "Install failed with $($p.ExitCode)" }
+          $app = Get-ChildItem "$env:LOCALAPPDATA\Keep the Diff", "$env:ProgramFiles\Keep the Diff" -Filter "Keep the Diff.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $app) { throw "Installed, but Keep the Diff.exe was not found" }
+          $widgetDir = Join-Path $app.DirectoryName "app\resources\widget"
+          Write-Host "app:    $($app.FullName)"
+          Write-Host "widget: $widgetDir"
+
+          Start-Process $app.FullName | Out-Null
+          $pkg = $null; $deadline = (Get-Date).AddSeconds(240)
+          while (-not $pkg -and (Get-Date) -lt $deadline) { Start-Sleep 3; $pkg = Get-AppxPackage -Name $env:PACKAGE_NAME }
+          $data = "$env:LOCALAPPDATA\KeepTheDiff"
+          if (-not $pkg) {
+            if (Test-Path "$data\widget-registration.log") { Get-Content "$data\widget-registration.log" | Write-Host }
+            throw "The app did not register the widget package within 240 s of launching (x64 under ARM emulation)"
+          }
+          Write-Host "registered by the app: $($pkg.PackageFullName)"
+          $deadline = (Get-Date).AddSeconds(90)
+          while (-not (Test-Path "$data\widget.json") -and (Get-Date) -lt $deadline) { Start-Sleep 2 }
+          if (-not (Test-Path "$data\widget.json")) { throw "The app did not write widget.json" }
+          "exe=$($app.FullName)" >> $env:GITHUB_OUTPUT
+          "widget=$widgetDir" >> $env:GITHUB_OUTPUT
+          "data=$data" >> $env:GITHUB_OUTPUT
+
+      # A card that says "Premium unlocks this widget" is a true card and a poor photograph of a
+      # layout. The app on this runner has no account, so the fixture the renders have always used
+      # is written in its place, and the app is closed first so it cannot write over it. The board
+      # reads whatever is in that file: this changes the DATA, never the provider.
+      - name: Show the cards their ready state
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          Get-Process "Keep the Diff" -ErrorAction SilentlyContinue | Stop-Process -Force
+          Start-Sleep 5
+          Copy-Item "$env:SHIP\ready\*" "${{ steps.app.outputs.data }}" -Force
+          Get-Content "${{ steps.app.outputs.data }}\widget.json" | Write-Host
+
+      - name: Pin the three widgets and photograph the board
+        shell: powershell
+        env:
+          APP_EXE: ${{ steps.app.outputs.exe }}
+        run: ./scripts/pin-widgets.ps1 -OutDir $env:OUT -AppExe $env:APP_EXE
+
+      - name: Collect logs
+        if: always()
+        shell: powershell
+        run: |
+          New-Item -ItemType Directory -Force -Path $env:OUT | Out-Null
+          Copy-Item "$env:LOCALAPPDATA\KeepTheDiff\widget-registration.log" $env:OUT -ErrorAction SilentlyContinue
+          Copy-Item "$env:LOCALAPPDATA\KeepTheDiff\widget.json" "$env:OUT\widget.json" -ErrorAction SilentlyContinue
+          Get-WinEvent -LogName Application -MaxEvents 80 -ErrorAction SilentlyContinue |
+            Select-Object TimeCreated, ProviderName, Id, Message | Format-List | Out-File "$env:OUT\application-log.txt"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        if: always()
+        with:
+          name: windows11-board-proof
+          path: board-proof/
