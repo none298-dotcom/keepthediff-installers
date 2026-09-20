@@ -289,8 +289,20 @@ function Clear-Intruders {
     }
     $closed++
   }
+  # AND THE ONE THAT DOES NOT HAVE A VISIBLE WINDOW AT ALL.
+  # Closing the Shell_OOBEProxy above is not enough: run 35492492126 found the FOREGROUND still held
+  # by WWAHost's 'Microsoft account' CoreWindow, which IsWindowVisible does not report, so nothing
+  # above ever saw it. The board checks whether it is the active window and dismisses itself when it
+  # is not, which is why it kept vanishing inside half a second. The out-of-box host is ended by
+  # process, not by window.
+  foreach ($p in @(Get-Process WWAHost, CloudExperienceHostBroker, UserOOBEBroker, FirstLogonAnim -ErrorAction SilentlyContinue)) {
+    Write-Host "ending the out-of-box host $($p.ProcessName) (pid $($p.Id))"
+    Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+    $closed++
+  }
+  Start-Sleep 4
+  Write-Host "the foreground is now held by: $([Board]::Describe([Board]::GetForegroundWindow()))"
   if ($closed -eq 0) { Write-Host "nothing was covering the desktop" }
-  Start-Sleep 3
   return $closed
 }
 
@@ -454,9 +466,11 @@ $VK_LWIN = 0x5B; $VK_W = 0x57; $VK_ESCAPE = 0x1B; $VK_RETURN = 0x0D; $VK_TAB = 0
 
 # ── The board ─────────────────────────────────────────────────────────────────
 #
-# Win+W is what a person presses, so it is tried first and it is the one the screenshots are of.
-# The board's own app entry is the fallback, and which route opened it is printed, because
-# "the board opened" and "the shortcut works" are two different claims.
+# Win+W is what a person presses, and it does nothing on this runner, because the shell's hotkeys
+# are not reachable from a session that drops injected input. The board is started through the same
+# app entry the taskbar button starts, and Open-Board says which route worked so that "the board
+# opened" is never confused with "the shortcut works".
+#
 # Open it ONCE and leave it open. There is no way to close it from here (this session drops
 # injected input, so there is no Escape to press), and a host that has been ended does not come
 # back: run 35491820930 ended Widgets.exe first and then waited 100 seconds across four activations
@@ -464,7 +478,7 @@ $VK_LWIN = 0x5B; $VK_W = 0x57; $VK_ESCAPE = 0x1B; $VK_RETURN = 0x0D; $VK_TAB = 0
 function Open-Board([int] $Tries = 3, [int] $Seconds = 60) {
   if (Test-BoardOpen) { return "already open" }
   $pkg = Get-AppxPackage -Name MicrosoftWindows.Client.WebExperience
-  foreach ($id in "Widgets", "Global.WidgetBoard") {
+  foreach ($id in @("Widgets")) {
     for ($i = 1; $i -le $Tries; $i++) {
       $aumid = "$($pkg.PackageFamilyName)!$id"
       [Board]::UnlockForeground()
