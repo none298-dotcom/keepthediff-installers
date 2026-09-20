@@ -405,7 +405,13 @@ function Get-BoardRoot {
 # Every element under $Root whose name contains $Text. With no root, the board's content window.
 function Find-Elements([string] $Text, $Root = $null) {
   $found = New-Object System.Collections.Generic.List[object]
-  $roots = if ($Root) { @($Root) } else { @(Get-PickerRoot, Get-BoardRoot | Where-Object { $_ }) }
+  # The picker first when it is up, because it is the window in front of the board.
+  $roots = New-Object System.Collections.Generic.List[object]
+  if ($Root) { $roots.Add($Root) }
+  else {
+    $p = Get-PickerRoot; if ($p) { $roots.Add($p) }
+    $b = Get-BoardRoot;  if ($b) { $roots.Add($b) }
+  }
   if ($roots.Count -eq 0) { return $found }
   function Walk($e, $depth) {
     if ($depth -gt 40) { return }
