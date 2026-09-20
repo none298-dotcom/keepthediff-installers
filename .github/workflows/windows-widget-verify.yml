@@ -351,12 +351,11 @@ jobs:
           Write-Host "$($r.testsuite.tests) tests, $($r.testsuite.skipped) skipped, $($r.testsuite.failures) failures"
           if ([int]$r.testsuite.skipped -gt 0) { throw "The Windows registration test skipped itself" }
 
-      # REPORTS, DOES NOT BLOCK. These tests save through AppModel more than once, and on Windows
-      # every save after the first fails: PersistenceStore and LockStore replace their file with
-      # File.renameTo, which the JDK implements with _wrename, and _wrename will not overwrite. That
-      # is the app's own bug, not the widget's; this step keeps it visible until it is fixed.
-      - name: Run the widget.json tests on Windows (known to fail until saving is fixed)
-        continue-on-error: true
+      # BLOCKING SINCE 6505ab6. These tests save through AppModel more than once, which used to fail
+      # on Windows from the second save on: PersistenceStore and LockStore replaced their file with
+      # File.renameTo, which the JDK implements with _wrename, and _wrename will not overwrite. The
+      # app moves its files with Files.move now, so this step is allowed to fail the run again.
+      - name: Run the widget.json tests on Windows
         working-directory: android
         shell: pwsh
         run: |
