@@ -130,16 +130,17 @@ public class Board {
   }
   [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
   public delegate bool EnumProc(IntPtr h, IntPtr p);
-  public class Top { public IntPtr Handle; public uint Pid; public string Class; public string Title; public RECT Rect; }
-  public static System.Collections.Generic.List<Top> Tops() {
+  public class Top { public IntPtr Handle; public uint Pid; public string Class; public string Title; public RECT Rect; public bool Visible; }
+  public static System.Collections.Generic.List<Top> Tops() { return Tops(true); }
+  public static System.Collections.Generic.List<Top> Tops(bool visibleOnly) {
     var list = new System.Collections.Generic.List<Top>();
     EnumWindows((h, p) => {
-      if (!IsWindowVisible(h)) return true;
+      if (visibleOnly && !IsWindowVisible(h)) return true;
       var t = new StringBuilder(512); GetWindowTextW(h, t, 512);
       var c = new StringBuilder(512); GetClassNameW(h, c, 512);
       uint pid; GetWindowThreadProcessId(h, out pid);
       RECT r; GetWindowRect(h, out r);
-      list.Add(new Top { Handle = h, Pid = pid, Class = c.ToString(), Title = t.ToString(), Rect = r });
+      list.Add(new Top { Handle = h, Pid = pid, Class = c.ToString(), Title = t.ToString(), Rect = r, Visible = IsWindowVisible(h) });
       return true;
     }, IntPtr.Zero);
     return list;

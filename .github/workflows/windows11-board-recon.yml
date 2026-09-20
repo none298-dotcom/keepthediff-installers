@@ -31,41 +31,50 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      - name: Hand the board the foreground, then open the picker
+      - name: When the board goes, does its window go with it
         shell: powershell
         run: |
           $ErrorActionPreference = "Stop"
           . ./scripts/board.ps1
           Start-Board $env:OUT
+
+          # The board dismisses itself because it never gets the foreground, and it cannot be given
+          # it: SetForegroundWindow fails even with the current owner's input queue attached, since
+          # this session has never received an input event to hand out. Ending the out-of-box host
+          # only moved the foreground to the next shell surface (run 35492905319).
+          #
+          # So the question changes. A light-dismissed flyout usually HIDES its window rather than
+          # destroying it, and the board's content lives in a separate WebView2 top-level window.
+          # If either survives, it can still be read and photographed.
           [void](Clear-Intruders)
-          "the window that holds the foreground here: $([Board]::Describe([Board]::GetForegroundWindow()))"
+          $pkg = Get-AppxPackage -Name MicrosoftWindows.Client.WebExperience
+          "activate: $([Activator2]::Activate("$($pkg.PackageFamilyName)!Widgets"))"
+          Start-Sleep 6
 
-          if (-not (Ensure-Board)) { throw "The board did not open, or would not stay" }
-          $board = Get-BoardWindow
-          Save-WindowShot $board.Handle "board" -Required | Out-Null
-          for ($i = 1; $i -le 6; $i++) {
-            Start-Sleep 5
-            "+$($i * 5) s: the board is $(if (Get-BoardWindow) { 'open' } else { 'GONE' }); foreground $([Board]::Describe([Board]::GetForegroundWindow()))"
+          foreach ($label in "after it has gone") {
+            "=== $label: every top-level window, hidden ones included ==="
+            foreach ($w in [Board]::Tops($false)) {
+              if (($w.Rect.Right - $w.Rect.Left) -lt 200 -or ($w.Rect.Bottom - $w.Rect.Top) -lt 200) { continue }
+              $name = try { (Get-Process -Id $w.Pid -ErrorAction Stop).ProcessName } catch { "gone" }
+              "  $($w.Handle) $name [$($w.Class)] '$($w.Title)' $($w.Rect.Right - $w.Rect.Left)x$($w.Rect.Bottom - $w.Rect.Top) visible=$($w.Visible)"
+            }
           }
-          Save-Tree "board" | Out-Null
 
-          if (-not (Ensure-Board)) { throw "The board closed and would not come back" }
-          $add = @(Find-Elements "Add widgets" | Where-Object { "$($_.Current.ControlType.ProgrammaticName)" -match 'Button' })[0]
-          if (-not $add) { throw "No 'Add widgets' button" }
-          "the add button: $(Show-Element $add)"
-          "pressed through: $(Press-Element $add)"
-          Start-Sleep 4
-          [Board]::Windows() | Write-Host
-          foreach ($w in [Board]::Tops()) {
-            if (($w.Rect.Right - $w.Rect.Left) -lt 250 -or ($w.Rect.Bottom - $w.Rect.Top) -lt 250) { continue }
+          "=== can the hidden ones still be photographed and read ==="
+          foreach ($w in [Board]::Tops($false)) {
+            if ($w.Class -ne "WindowsDashboard" -and $w.Class -ne "Chrome_WidgetWin_1") { continue }
+            if (($w.Rect.Right - $w.Rect.Left) -lt 200) { continue }
             $name = try { (Get-Process -Id $w.Pid -ErrorAction Stop).ProcessName } catch { "gone" }
-            Save-WindowShot $w.Handle "picker-$name-$($w.Handle)" | Out-Null
+            "--- $name [$($w.Class)] $($w.Handle), visible=$($w.Visible) ---"
+            [void][Board]::ShowWindow($w.Handle, 8)   # SW_SHOWNA: show without activating
+            Start-Sleep 2
+            Save-WindowShot $w.Handle "hidden-$name-$($w.Handle)" | Out-Null
           }
-          Save-Tree "picker" | Out-Null
-          foreach ($word in "Add widgets", "Search", "Weather", "Pin", "Traffic", "Sports", "Watchlist") {
+          Save-Tree "after-dismiss" | Out-Null
+          foreach ($word in "Add widgets", "Widgets", "Weather") {
             $hits = @(Find-Elements $word)
             "named like '$word': $($hits.Count)"
-            $hits | Select-Object -First 14 | ForEach-Object { "  " + (Show-Element $_) }
+            $hits | Select-Object -First 10 | ForEach-Object { "  " + (Show-Element $_) }
           }
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
