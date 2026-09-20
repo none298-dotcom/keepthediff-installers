@@ -396,6 +396,26 @@ function Get-PickerRoot {
   try { return [System.Windows.Automation.AutomationElement]::FromHandle($w.Handle) } catch { return $null }
 }
 
+# The picker takes its time. It appears as a window first, then draws a spinner, and only then
+# fills in: six seconds after the add button was pressed there was no window at all, and a minute
+# later the list was complete (run 35494654489). So it is waited for by what is IN it.
+function Wait-Picker([int] $Seconds = 120) {
+  $deadline = (Get-Date).AddSeconds($Seconds)
+  while ((Get-Date) -lt $deadline) {
+    $root = Get-PickerRoot
+    if ($root) {
+      $items = @(Find-Elements "" $root | Where-Object { "$($_.Current.ControlType.ProgrammaticName)" -match 'ListItem' })
+      if ($items.Count -ge 2) {
+        Write-Host "the picker has finished loading: $($items.Count) widgets listed"
+        return $true
+      }
+    }
+    Start-Sleep 3
+  }
+  Write-Host "the picker never finished loading in $Seconds s"
+  return $false
+}
+
 function Get-BoardRoot {
   $w = Get-BoardContentWindow
   if (-not $w) { return $null }
