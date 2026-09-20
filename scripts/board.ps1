@@ -512,16 +512,17 @@ $VK_LWIN = 0x5B; $VK_W = 0x57; $VK_ESCAPE = 0x1B; $VK_RETURN = 0x0D; $VK_TAB = 0
 # back: run 35491820930 ended Widgets.exe first and then waited 100 seconds across four activations
 # for a board that never appeared.
 function Open-Board([int] $Tries = 3, [int] $Seconds = 60) {
-  if (Test-BoardOpen) { return "already open" }
+  if (Get-BoardRoot) { return "already loaded" }
   $pkg = Get-AppxPackage -Name MicrosoftWindows.Client.WebExperience
-  foreach ($id in @("Widgets")) {
-    for ($i = 1; $i -le $Tries; $i++) {
-      $aumid = "$($pkg.PackageFamilyName)!$id"
+  $aumid = "$($pkg.PackageFamilyName)!Widgets"
+  for ($i = 1; $i -le $Tries; $i++) {
+    if (-not (Get-BoardContentWindow)) {
       [Board]::UnlockForeground()
       Write-Host "activating $aumid (attempt $i): $([Activator2]::Activate($aumid))"
-      if (Wait-BoardOpen $Seconds) { return "ActivateApplication ...!$id (attempt $i)" }
-      Write-Host "  no board yet; running: $((Get-Process Widgets, WidgetService, WidgetBoard, msedgewebview2 -ErrorAction SilentlyContinue | ForEach-Object { $_.ProcessName }) -join ', ')"
+    } else {
+      Write-Host "the board's content window is already there; not activating it again (attempt $i)"
     }
+    if (Wait-BoardOpen $Seconds) { return "ActivateApplication $aumid (attempt $i)" }
   }
   return ""
 }
@@ -595,13 +596,37 @@ function Wait-BoardPainted([int] $Seconds = 90) {
   return $false
 }
 
-function Wait-BoardOpen([int] $Seconds = 20) {
+# THE ONE COUNTER-INTUITIVE THING ABOUT THIS RUNNER
+# While the board's content window is ON SCREEN, PrintWindow returns a blank rectangle, for ninety
+# seconds straight (run 35493656024). The instant the board dismissed itself and the window went
+# hidden, the same call returned a fully drawn board, and activating it again blanked it once more.
+# Nothing presents to this desktop's framebuffer, so a visible window has nowhere to draw that can
+# be read back, while a hidden one is composed into an offscreen surface that PrintWindow can.
+#
+# So the board is activated once, allowed to load, and then read and photographed in the state it
+# puts itself into anyway. It is never activated a second time: that would only blank it again.
+function Wait-BoardHidden([int] $Seconds = 60) {
+  $deadline = (Get-Date).AddSeconds($Seconds)
+  while ((Get-Date) -lt $deadline) {
+    $w = Get-BoardContentWindow
+    if ($w -and -not $w.Visible) { Write-Host "the board has dismissed itself, which is when it becomes readable"; return $true }
+    Start-Sleep 2
+  }
+  $w = Get-BoardContentWindow
+  if (-not $w) { return $false }
+  Write-Host "the board stayed on screen for $Seconds s, so it is being hidden from here instead"
+  [void][Board]::ShowWindow($w.Handle, 0)   # SW_HIDE
+  Start-Sleep 3
+  return $true
+}
+
+function Wait-BoardOpen([int] $Seconds = 60) {
   $deadline = (Get-Date).AddSeconds($Seconds)
   while ((Get-Date) -lt $deadline) {
     $w = Get-BoardContentWindow
     if ($w) {
-      [void][Board]::ForceForeground($w.Handle)
       Write-Host "board content: handle $($w.Handle), $($w.Rect.Right - $w.Rect.Left)x$($w.Rect.Bottom - $w.Rect.Top), on screen: $($w.Visible)"
+      if (-not (Wait-BoardHidden 60)) { return $false }
       if (-not (Wait-BoardPainted 90)) { return $false }
       return [bool](Get-BoardRoot)
     }
