@@ -61,7 +61,7 @@ jobs:
           Start-Board $env:OUT
           $script:BoardShot = 10
           [void](Clear-Intruders)
-          $route = Open-Board 60
+          $route = Open-Board
           "the board opened via: '$route'"
           Start-Sleep 12
           [Board]::Windows() | Write-Host
@@ -91,31 +91,47 @@ jobs:
           }
           if (-not $route) { Write-Host "::warning::The board did not open by either route" }
 
-      # The run before this one clicked the board's add button and the board VANISHED: no picker, no
-      # dashboard window, nothing. Two explanations fit, and they need different fixes, so both are
-      # measured here. Either the pointer never went where it was sent and the press landed on the
-      # transparent margin, which light-dismisses the board; or the board dismisses on any synthetic
-      # press and the accessibility API is the only way in.
-      - name: Where does the pointer actually go
+      # The pointer goes exactly where it is sent on this runner (measured), and a press on a plain
+      # Win32 dialog's Cancel button does not close it. So injected input is being dropped. Three
+      # candidates, tried on that same dialog because it is a control nobody can argue with: the
+      # thread is not on the input desktop; mouse_event is discarded where SendInput is not; or
+      # nothing injected works here and the accessibility API is the only way in.
+      - name: Why does injected input not arrive
         shell: powershell
         continue-on-error: true
         run: |
           $ErrorActionPreference = "Stop"
           . ./scripts/board.ps1
           Start-Board $env:OUT
-          $script:BoardShot = 30
-          # A plain Win32 dialog is the control: if its Cancel button closes it, the pointer works
-          # and anything the board does differently is the board's own behaviour.
-          $dialog = [Board]::Tops() | Where-Object { $_.Title -eq "Performance Options" } | Select-Object -First 1
-          if ($dialog) {
-            $cancel = Find-Elements "Cancel" | Select-Object -First 1
-            if ($cancel) {
-              "control: $(Show-Element $cancel)"
-              Click-Element $cancel
-              $still = [Board]::Tops() | Where-Object { $_.Handle -eq $dialog.Handle }
-              "after the click the dialog is $(if ($still) { 'STILL OPEN: the pointer does not work' } else { 'closed: the pointer works' })"
-            }
-          } else { "no Performance Options dialog to use as a control" }
+          function Dialog { [Board]::Tops() | Where-Object { $_.Title -eq "Performance Options" } | Select-Object -First 1 }
+          [Board]::Desktops()
+          $d = Dialog
+          if (-not $d) { "no Performance Options dialog to use as a control"; exit 0 }
+          $cancel = @(Find-Elements "Cancel")[0]
+          $r = $cancel.Current.BoundingRectangle
+          $x = [int]($r.X + $r.Width / 2); $y = [int]($r.Y + $r.Height / 2)
+          "control: $(Show-Element $cancel)"
+
+          "--- 1. SendInput, absolute ---"
+          [Board]::SendClick($x, $y)
+          Start-Sleep 2
+          "the dialog is $(if (Dialog) { 'still open' } else { 'CLOSED' })"
+          if (-not (Dialog)) { exit 0 }
+
+          "--- 2. the same, after joining the input desktop ---"
+          "SetThreadDesktop: $([Board]::UseInputDesktop())"
+          [Board]::Desktops()
+          [Board]::SendClick($x, $y)
+          Start-Sleep 2
+          "the dialog is $(if (Dialog) { 'still open' } else { 'CLOSED' })"
+          if (-not (Dialog)) { exit 0 }
+
+          "--- 3. the accessibility API, which injects nothing ---"
+          try {
+            $cancel.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
+            Start-Sleep 2
+            "the dialog is $(if (Dialog) { 'still open' } else { 'CLOSED' })"
+          } catch { "InvokePattern failed: $($_.Exception.Message)" }
 
       - name: Open the picker through the accessibility API instead
         shell: powershell
@@ -125,7 +141,7 @@ jobs:
           Start-Board $env:OUT
           $script:BoardShot = 40
           [void](Clear-Intruders)
-          $route = Open-Board 60
+          $route = Open-Board
           "opened via '$route'"
           $board = Get-BoardWindow
           if (-not $board) { throw "The board is not open" }

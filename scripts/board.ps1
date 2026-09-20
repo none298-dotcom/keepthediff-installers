@@ -54,6 +54,43 @@ public class Board {
   [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
   [DllImport("user32.dll")] public static extern IntPtr SetActiveWindow(IntPtr h);
   [DllImport("dwmapi.dll")] public static extern int DwmGetWindowAttribute(IntPtr h, int attr, out RECT r, int size);
+  [DllImport("user32.dll")] public static extern IntPtr GetThreadDesktop(uint thread);
+  [DllImport("user32.dll")] public static extern IntPtr OpenInputDesktop(uint flags, bool inherit, uint access);
+  [DllImport("user32.dll")] public static extern bool SetThreadDesktop(IntPtr desktop);
+  [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern bool GetUserObjectInformationW(IntPtr h, int index, StringBuilder info, int length, out int needed);
+  [DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
+  public static string DesktopName(IntPtr h) {
+    if (h == IntPtr.Zero) return "<none>";
+    var sb = new StringBuilder(256); int needed;
+    return GetUserObjectInformationW(h, 2, sb, 512, out needed) ? sb.ToString() : "<unreadable>";
+  }
+  public static string Desktops() {
+    var mine = GetThreadDesktop(GetCurrentThreadId());
+    var input = OpenInputDesktop(0, false, 0x0100 | 0x0001);   // DESKTOP_READOBJECTS | DESKTOP_SWITCHDESKTOP
+    return "this thread's desktop: " + DesktopName(mine) + "; the INPUT desktop: " +
+      (input == IntPtr.Zero ? "<OpenInputDesktop failed, error " + Marshal.GetLastWin32Error() + ">" : DesktopName(input));
+  }
+  public static bool UseInputDesktop() {
+    var input = OpenInputDesktop(0, true, 0x01FF);            // DESKTOP_ALL minus nothing that matters
+    return input != IntPtr.Zero && SetThreadDesktop(input);
+  }
+  public static void SendClick(int x, int y) {
+    // Absolute SendInput, normalised to the 65535-wide virtual screen, with a move in the same
+    // batch as the press: mouse_event's separate SetCursorPos is exactly the shape of injection
+    // some input stacks discard.
+    int w = GetSystemMetrics(0), h = GetSystemMetrics(1);
+    var inputs = new INPUT[3];
+    for (int i = 0; i < 3; i++) {
+      inputs[i].type = 0;
+      inputs[i].mi.dx = (x * 65535) / w;
+      inputs[i].mi.dy = (y * 65535) / h;
+    }
+    inputs[0].mi.dwFlags = 0x8001;   // ABSOLUTE | MOVE
+    inputs[1].mi.dwFlags = 0x8003;   // ABSOLUTE | LEFTDOWN
+    inputs[2].mi.dwFlags = 0x8005;   // ABSOLUTE | LEFTUP
+    SendInput(3, inputs, Marshal.SizeOf(typeof(INPUT)));
+  }
+  [DllImport("user32.dll")] public static extern int GetSystemMetrics(int index);
   [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
   public delegate bool EnumProc(IntPtr h, IntPtr p);
   public class Top { public IntPtr Handle; public uint Pid; public string Class; public string Title; public RECT Rect; }
@@ -338,14 +375,14 @@ $VK_LWIN = 0x5B; $VK_W = 0x57; $VK_ESCAPE = 0x1B; $VK_RETURN = 0x0D; $VK_TAB = 0
 # Win+W is what a person presses, so it is tried first and it is the one the screenshots are of.
 # The board's own app entry is the fallback, and which route opened it is printed, because
 # "the board opened" and "the shortcut works" are two different claims.
-function Open-Board([int] $Seconds = 40) {
+function Open-Board([int] $Tries = 4) {
   if (Test-BoardOpen) { return "already open" }
-  Send-Key $VK_W @($VK_LWIN)
-  if (Wait-BoardOpen ($Seconds / 2)) { return "Win+W" }
-  Write-Host "Win+W did not open it; trying the board's own app entry"
   $pkg = Get-AppxPackage -Name MicrosoftWindows.Client.WebExperience
-  Start-Process "explorer.exe" "shell:AppsFolder\$($pkg.PackageFamilyName)!Widgets"
-  if (Wait-BoardOpen ($Seconds / 2)) { return "shell:AppsFolder" }
+  for ($i = 1; $i -le $Tries; $i++) {
+    Start-Process "explorer.exe" "shell:AppsFolder\$($pkg.PackageFamilyName)!Widgets"
+    if (Wait-BoardOpen 25) { return "shell:AppsFolder (attempt $i)" }
+    Write-Host "attempt $i did not bring the board up"
+  }
   return ""
 }
 
