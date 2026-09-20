@@ -53,7 +53,7 @@ jobs:
           Send-Key $VK_ESCAPE
           Start-Sleep 3
 
-      - name: Win+W
+      - name: Open the board and try every way of photographing it
         shell: powershell
         run: |
           $ErrorActionPreference = "Stop"
@@ -63,17 +63,32 @@ jobs:
           [void](Clear-Intruders)
           $route = Open-Board 60
           "the board opened via: '$route'"
-          Save-Shot "board" | Out-Null
-          Save-Tree "board" | Out-Null
+          Start-Sleep 12
           [Board]::Windows() | Write-Host
-          foreach ($word in "Widget", "Add", "Keep the Diff", "Weather", "Pin", "Sign in") {
+
+          # Every window worth a picture, through both PrintWindow modes and through the screen, so
+          # the next workflow can use whichever one actually draws.
+          foreach ($w in [Board]::Tops()) {
+            $wide = $w.Rect.Right - $w.Rect.Left; $high = $w.Rect.Bottom - $w.Rect.Top
+            if ($wide -lt 300 -or $high -lt 300) { continue }
+            $name = try { (Get-Process -Id $w.Pid -ErrorAction Stop).ProcessName } catch { "gone" }
+            foreach ($flags in 0, 2) {
+              $bmp = Get-WindowImage $w.Handle $flags
+              if (-not $bmp) { "PrintWindow($flags) refused $name [$($w.Class)]"; continue }
+              $colours = Measure-Colours $bmp
+              $file = Join-Path $env:OUT ("pw{0}-{1}-{2}.png" -f $flags, $name, $w.Handle)
+              $bmp.Save($file, [System.Drawing.Imaging.ImageFormat]::Png)
+              "PrintWindow($flags) $name [$($w.Class)] $($bmp.Width)x$($bmp.Height): $colours colours -> $(Split-Path $file -Leaf)"
+              $bmp.Dispose()
+            }
+          }
+          Save-Shot "screen-for-comparison" | Out-Null
+          Save-Tree "board" | Out-Null
+          foreach ($word in "Widget", "Add", "Keep the Diff", "Weather", "Pin", "Sign in", "Edit") {
             $hits = @(Find-Elements $word)
             "named like '$word': $($hits.Count)"
-            $hits | Select-Object -First 10 | ForEach-Object { "  " + (Show-Element $_) }
+            $hits | Select-Object -First 12 | ForEach-Object { "  " + (Show-Element $_) }
           }
-          Start-Sleep 12
-          Save-Shot "board-settled" | Out-Null
-          Save-Tree "board-settled" | Out-Null
           if (-not $route) { Write-Host "::warning::The board did not open by either route" }
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7

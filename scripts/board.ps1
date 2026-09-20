@@ -43,6 +43,11 @@ public class Board {
   [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
   [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
   [DllImport("user32.dll")] public static extern IntPtr PostMessageW(IntPtr h, uint msg, IntPtr w, IntPtr l);
+  [DllImport("user32.dll")] public static extern bool PrintWindow(IntPtr h, IntPtr hdc, uint flags);
+  [DllImport("user32.dll")] public static extern bool RedrawWindow(IntPtr h, IntPtr rect, IntPtr rgn, uint flags);
+  [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
+  [DllImport("user32.dll")] public static extern IntPtr SetActiveWindow(IntPtr h);
+  [DllImport("dwmapi.dll")] public static extern int DwmGetWindowAttribute(IntPtr h, int attr, out RECT r, int size);
   [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
   public delegate bool EnumProc(IntPtr h, IntPtr p);
   public class Top { public IntPtr Handle; public uint Pid; public string Class; public string Title; public RECT Rect; }
@@ -86,6 +91,58 @@ function Get-Screen {
   $g.CopyFromScreen($b.Location, [System.Drawing.Point]::Empty, $b.Size)
   $g.Dispose()
   return $bmp
+}
+
+# WHY WINDOWS ARE CAPTURED ONE AT A TIME AND NOT OFF THE SCREEN
+# The second recon run (35490776224) closed the out-of-box page, opened the Widgets Board, and
+# proved from the window list that both had happened. Every full-screen grab still showed the
+# out-of-box page: this session composes, but nothing presents to the framebuffer that BitBlt
+# reads, so CopyFromScreen returns whatever was last pushed to it. A screenshot of the board taken
+# that way would be a photograph of a page that had already closed.
+#
+# PrintWindow with PW_RENDERFULLCONTENT asks DWM for the window's own composed surface instead,
+# which is drawn whether or not anything is presenting it. Assert-Fresh checks the result is not
+# one flat colour, because a window that declines to render returns exactly that.
+function Get-WindowImage([IntPtr] $Handle, [uint32] $Flags = 2) {
+  $r = New-Object Board+RECT
+  # The DWM extended-frame bounds, not GetWindowRect: the latter includes the invisible resize
+  # border, which arrives as a black margin.
+  if ([Board]::DwmGetWindowAttribute($Handle, 9, [ref] $r, 16) -ne 0) { [void][Board]::GetWindowRect($Handle, [ref] $r) }
+  $w = $r.Right - $r.Left; $h = $r.Bottom - $r.Top
+  if ($w -le 0 -or $h -le 0) { return $null }
+  $bmp = New-Object System.Drawing.Bitmap $w, $h
+  $g = [System.Drawing.Graphics]::FromImage($bmp)
+  $hdc = $g.GetHdc()
+  $ok = [Board]::PrintWindow($Handle, $hdc, $Flags)
+  $g.ReleaseHdc($hdc)
+  $g.Dispose()
+  if (-not $ok) { $bmp.Dispose(); return $null }
+  return $bmp
+}
+
+function Measure-Colours($bmp) {
+  $colours = @{}
+  for ($y = 0; $y -lt $bmp.Height; $y += 11) {
+    for ($x = 0; $x -lt $bmp.Width; $x += 11) { $colours[$bmp.GetPixel($x, $y).ToArgb()] = $true }
+  }
+  return $colours.Count
+}
+
+function Save-WindowShot([IntPtr] $Handle, [string] $Name, [switch] $Required) {
+  $script:BoardShot++
+  $bmp = Get-WindowImage $Handle
+  if (-not $bmp) {
+    if ($Required) { throw "PrintWindow refused to draw the window for '$Name'" }
+    Write-Host "no image for $Name"
+    return $null
+  }
+  $colours = Measure-Colours $bmp
+  $file = Join-Path $script:BoardOut ("{0:d2}-{1}.png" -f $script:BoardShot, $Name)
+  $bmp.Save($file, [System.Drawing.Imaging.ImageFormat]::Png)
+  Write-Host "shot: $file  $($bmp.Width)x$($bmp.Height), $colours colours"
+  $bmp.Dispose()
+  if ($Required -and $colours -lt 8) { throw "$Name captured as $colours colours, which is a blank rectangle, not a screenshot" }
+  return $file
 }
 
 function Save-Shot([string] $Name) {
@@ -147,7 +204,7 @@ function Assert-Screen {
 
 # ── The UI Automation tree ────────────────────────────────────────────────────
 
-function Get-Tree([System.Windows.Automation.AutomationElement] $Root, [int] $Depth = 0, [int] $Max = 14) {
+function Get-Tree([System.Windows.Automation.AutomationElement] $Root, [int] $Depth = 0, [int] $Max = 40) {
   $lines = New-Object System.Collections.Generic.List[string]
   if ($Depth -gt $Max) { return $lines }
   try { $name = $Root.Current.Name } catch { $name = "<?>" }
@@ -175,7 +232,7 @@ function Save-Tree([string] $Name) {
     $root = [System.Windows.Automation.AutomationElement]::RootElement
     $child = [System.Windows.Automation.TreeWalker]::ControlViewWalker.GetFirstChild($root)
     while ($child) {
-      foreach ($l in (Get-Tree $child 0 14)) { $out.Add($l) }
+      foreach ($l in (Get-Tree $child 0 40)) { $out.Add($l) }
       $child = [System.Windows.Automation.TreeWalker]::ControlViewWalker.GetNextSibling($child)
     }
   } catch { $out.Add("UI Automation failed: $($_.Exception.Message)") }
@@ -188,7 +245,7 @@ function Save-Tree([string] $Name) {
 function Find-Elements([string] $Text) {
   $found = New-Object System.Collections.Generic.List[object]
   function Walk($e, $depth) {
-    if ($depth -gt 14) { return }
+    if ($depth -gt 40) { return }
     try { $n = $e.Current.Name } catch { $n = "" }
     if ($n -and $n -like "*$Text*") { $found.Add($e) }
     try {
