@@ -570,6 +570,31 @@ function Get-BoardWindow {
 # session cannot answer in the board's favour.
 function Test-BoardOpen { return [bool](Get-BoardRoot) }
 
+# WAIT FOR PIXELS, NOT FOR A CLOCK.
+# A fixed sleep after activation produced a blank 800x696 capture in run 35493573613 and a fully
+# drawn board in the run before it, purely on timing. The board is ready when its window draws
+# something, so that is what is waited for, and a capture that never fills in is reported as such
+# instead of being saved as a white rectangle with a confident name.
+function Wait-BoardPainted([int] $Seconds = 90) {
+  $deadline = (Get-Date).AddSeconds($Seconds)
+  $best = 0
+  while ((Get-Date) -lt $deadline) {
+    $w = Get-BoardContentWindow
+    if ($w) {
+      $bmp = Get-WindowImage $w.Handle
+      if ($bmp) {
+        $colours = Measure-Colours $bmp
+        $bmp.Dispose()
+        if ($colours -gt $best) { $best = $colours }
+        if ($colours -ge 50) { Write-Host "the board has drawn: $colours colours"; return $true }
+      }
+    }
+    Start-Sleep 2
+  }
+  Write-Host "the board never drew more than $best colours in $Seconds s"
+  return $false
+}
+
 function Wait-BoardOpen([int] $Seconds = 20) {
   $deadline = (Get-Date).AddSeconds($Seconds)
   while ((Get-Date) -lt $deadline) {
@@ -577,9 +602,7 @@ function Wait-BoardOpen([int] $Seconds = 20) {
     if ($w) {
       [void][Board]::ForceForeground($w.Handle)
       Write-Host "board content: handle $($w.Handle), $($w.Rect.Right - $w.Rect.Left)x$($w.Rect.Bottom - $w.Rect.Top), on screen: $($w.Visible)"
-      # It needs a moment to finish laying out; the window survives being dismissed, so unlike the
-      # host window there is no hurry here.
-      Start-Sleep 5
+      if (-not (Wait-BoardPainted 90)) { return $false }
       return [bool](Get-BoardRoot)
     }
     Start-Sleep -Milliseconds 400
