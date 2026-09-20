@@ -1,19 +1,22 @@
-# Can the Windows 11 ARM runner's session actually be driven, and does the Widgets Board open?
+# What the Windows 11 ARM runner's Widgets Board is made of, so that windows11-board.yml can drive
+# it by name instead of by guess. It builds nothing and installs nothing.
 #
-# The earlier probe (windows11-board-probe.yml) found the board's own packages installed on this
-# image: MicrosoftWindows.Client.WebExperience and Microsoft.WidgetsPlatformRuntime, with explorer
-# running and a 1024x768 virtual screen. This asks the next questions, which are the ones that
-# decide whether the widgets can be seen: does the screen compose, does synthetic input reach the
-# shell, does Win+W open the board, and what does the board's UI Automation tree call things.
-#
-# WHAT THE FIRST RUN FOUND (35490463982): every screenshot after the first was byte for byte
-# identical, because the image boots parked on the Windows out-of-box privacy page, full screen,
-# over a live desktop. Widgets.exe and WidgetService.exe were already running in session 2. So the
-# session is real and the only thing wrong was what was in front of it, which scripts/board.ps1
-# closes now.
-#
-# It builds nothing. It exists to be read so that the real workflow clicks named elements instead
-# of guessed coordinates.
+# WHAT THE RUNS BEFORE THIS ONE ESTABLISHED, each the hard way:
+#  35490463982  The image boots parked on the Windows out-of-box privacy page, full screen, over a
+#               live desktop with explorer, Widgets.exe and WidgetService.exe running in session 2.
+#  35490776224  Nothing presents to the framebuffer: after that page was closed, a full-screen grab
+#               still showed it. PrintWindow with PW_RENDERFULLCONTENT against a named window works
+#               and is what every screenshot uses now.
+#  35490986353  The board opens from shell:AppsFolder\...!Widgets, renders, and its UI Automation
+#               rectangles are in the same coordinates as that capture. Win+W does nothing here.
+#  35491146383  A pointer press on the board made it vanish.
+#  35491583919  The pointer lands exactly where it is sent, the thread is already on the input
+#               desktop, and NEITHER mouse_event NOR SendInput closes a plain Win32 dialog's Cancel
+#               button. Injected input is dropped in this session. The same button through UI
+#               Automation's InvokePattern closed the dialog immediately.
+#               Also: the board opens once per job. After it closes, relaunching it does nothing,
+#               so the whole sequence has to happen in one step, and the widgets host is restarted
+#               first.
 name: Windows 11 board recon
 
 on:
@@ -28,143 +31,35 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      - name: Clear the desktop and prove input reaches the shell
+      - name: Open the board, open the picker, and write down what is in them
         shell: powershell
         run: |
           $ErrorActionPreference = "Stop"
           . ./scripts/board.ps1
           Start-Board $env:OUT
-          Write-Host "--- what is on screen before anything is touched ---"
-          [Board]::Windows() | Write-Host
-          Save-Shot "as-the-runner-hands-it-over" | Out-Null
           [void](Clear-Intruders)
-          Assert-Screen
-          Save-Shot "desktop" | Out-Null
-          Save-Tree "desktop" | Out-Null
-
-          # The Start menu is the cheapest proof that a synthetic Win key reaches the shell. If this
-          # does not open, nothing below is a statement about the Widgets Board.
-          Send-Key $VK_LWIN
-          Start-Sleep 5
-          Save-Shot "after-win-key" | Out-Null
-          $start = @([Board]::Tops() | Where-Object { $_.Class -eq "Windows.UI.Core.CoreWindow" })
-          "CoreWindows on screen after the Win key: $($start.Count)"
-          $start | ForEach-Object { "  [$($_.Class)] '$($_.Title)' pid $($_.Pid)" }
-          Send-Key $VK_ESCAPE
-          Start-Sleep 3
-
-      - name: Open the board and try every way of photographing it
-        shell: powershell
-        run: |
-          $ErrorActionPreference = "Stop"
-          . ./scripts/board.ps1
-          Start-Board $env:OUT
-          $script:BoardShot = 10
-          [void](Clear-Intruders)
-          $route = Open-Board
-          "the board opened via: '$route'"
-          Start-Sleep 12
-          [Board]::Windows() | Write-Host
-
-          # Every window worth a picture, through both PrintWindow modes and through the screen, so
-          # the next workflow can use whichever one actually draws.
-          foreach ($w in [Board]::Tops()) {
-            $wide = $w.Rect.Right - $w.Rect.Left; $high = $w.Rect.Bottom - $w.Rect.Top
-            if ($wide -lt 300 -or $high -lt 300) { continue }
-            $name = try { (Get-Process -Id $w.Pid -ErrorAction Stop).ProcessName } catch { "gone" }
-            foreach ($flags in 0, 2) {
-              $bmp = Get-WindowImage $w.Handle $flags
-              if (-not $bmp) { "PrintWindow($flags) refused $name [$($w.Class)]"; continue }
-              $colours = Measure-Colours $bmp
-              $file = Join-Path $env:OUT ("pw{0}-{1}-{2}.png" -f $flags, $name, $w.Handle)
-              $bmp.Save($file, [System.Drawing.Imaging.ImageFormat]::Png)
-              "PrintWindow($flags) $name [$($w.Class)] $($bmp.Width)x$($bmp.Height): $colours colours -> $(Split-Path $file -Leaf)"
-              $bmp.Dispose()
-            }
-          }
-          Save-Shot "screen-for-comparison" | Out-Null
-          Save-Tree "board" | Out-Null
-          foreach ($word in "Widget", "Add", "Keep the Diff", "Weather", "Pin", "Sign in", "Edit") {
-            $hits = @(Find-Elements $word)
-            "named like '$word': $($hits.Count)"
-            $hits | Select-Object -First 12 | ForEach-Object { "  " + (Show-Element $_) }
-          }
-          if (-not $route) { Write-Host "::warning::The board did not open by either route" }
-
-      # The pointer goes exactly where it is sent on this runner (measured), and a press on a plain
-      # Win32 dialog's Cancel button does not close it. So injected input is being dropped. Three
-      # candidates, tried on that same dialog because it is a control nobody can argue with: the
-      # thread is not on the input desktop; mouse_event is discarded where SendInput is not; or
-      # nothing injected works here and the accessibility API is the only way in.
-      - name: Why does injected input not arrive
-        shell: powershell
-        continue-on-error: true
-        run: |
-          $ErrorActionPreference = "Stop"
-          . ./scripts/board.ps1
-          Start-Board $env:OUT
-          function Dialog { [Board]::Tops() | Where-Object { $_.Title -eq "Performance Options" } | Select-Object -First 1 }
-          [Board]::Desktops()
-          $d = Dialog
-          if (-not $d) { "no Performance Options dialog to use as a control"; exit 0 }
-          $cancel = @(Find-Elements "Cancel")[0]
-          $r = $cancel.Current.BoundingRectangle
-          $x = [int]($r.X + $r.Width / 2); $y = [int]($r.Y + $r.Height / 2)
-          "control: $(Show-Element $cancel)"
-
-          "--- 1. SendInput, absolute ---"
-          [Board]::SendClick($x, $y)
-          Start-Sleep 2
-          "the dialog is $(if (Dialog) { 'still open' } else { 'CLOSED' })"
-          if (-not (Dialog)) { exit 0 }
-
-          "--- 2. the same, after joining the input desktop ---"
-          "SetThreadDesktop: $([Board]::UseInputDesktop())"
-          [Board]::Desktops()
-          [Board]::SendClick($x, $y)
-          Start-Sleep 2
-          "the dialog is $(if (Dialog) { 'still open' } else { 'CLOSED' })"
-          if (-not (Dialog)) { exit 0 }
-
-          "--- 3. the accessibility API, which injects nothing ---"
-          try {
-            $cancel.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
-            Start-Sleep 2
-            "the dialog is $(if (Dialog) { 'still open' } else { 'CLOSED' })"
-          } catch { "InvokePattern failed: $($_.Exception.Message)" }
-
-      - name: Open the picker through the accessibility API instead
-        shell: powershell
-        run: |
-          $ErrorActionPreference = "Stop"
-          . ./scripts/board.ps1
-          Start-Board $env:OUT
-          $script:BoardShot = 40
-          [void](Clear-Intruders)
+          Reset-WidgetsHost
           $route = Open-Board
           "opened via '$route'"
           $board = Get-BoardWindow
-          if (-not $board) { throw "The board is not open" }
-          Save-WindowShot $board.Handle "board-before" | Out-Null
+          if (-not $board) { throw "The board did not open" }
+          Save-WindowShot $board.Handle "board" -Required | Out-Null
+          Save-Tree "board" | Out-Null
 
-          $add = @(Find-Elements "Add widgets" | Where-Object { $_.Current.ControlType.ProgrammaticName -match 'Button' }) | Select-Object -First 1
-          if (-not $add) { throw "No 'Add widgets' button in the board" }
+          $add = @(Find-Elements "Add widgets" | Where-Object { "$($_.Current.ControlType.ProgrammaticName)" -match 'Button' })[0]
+          if (-not $add) { throw "No 'Add widgets' button" }
           "the add button: $(Show-Element $add)"
-          $how = Press-Element $add
-          "pressed it through: $how"
+          "pressed through: $(Press-Element $add)"
+          Start-Sleep 8
 
-          for ($i = 1; $i -le 8; $i++) {
-            Start-Sleep 3
-            $tops = @([Board]::Tops() | Where-Object { ($_.Rect.Right - $_.Rect.Left) -gt 300 -and ($_.Rect.Bottom - $_.Rect.Top) -gt 300 })
-            "t+$($i * 3)s: $(($tops | ForEach-Object { "[$($_.Class)]$($_.Title)" }) -join '  ')"
-          }
+          [Board]::Windows() | Write-Host
           Save-Tree "picker" | Out-Null
           foreach ($w in [Board]::Tops()) {
-            if (($w.Rect.Right - $w.Rect.Left) -lt 300 -or ($w.Rect.Bottom - $w.Rect.Top) -lt 300) { continue }
+            if (($w.Rect.Right - $w.Rect.Left) -lt 250 -or ($w.Rect.Bottom - $w.Rect.Top) -lt 250) { continue }
             $name = try { (Get-Process -Id $w.Pid -ErrorAction Stop).ProcessName } catch { "gone" }
-            Save-WindowShot $w.Handle "window-$name-$($w.Handle)" | Out-Null
+            Save-WindowShot $w.Handle "picker-$name-$($w.Handle)" | Out-Null
           }
-          foreach ($word in "Add widgets", "Search", "Keep the Diff", "Weather", "Pin") {
+          foreach ($word in "Add widgets", "Search", "Weather", "Pin", "Esports", "Traffic", "Sports") {
             $hits = @(Find-Elements $word)
             "named like '$word': $($hits.Count)"
             $hits | Select-Object -First 14 | ForEach-Object { "  " + (Show-Element $_) }

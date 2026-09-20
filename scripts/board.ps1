@@ -353,19 +353,38 @@ function Click-Element($e) {
   Click-At ([int]($r.X + $r.Width / 2)) ([int]($r.Y + $r.Height / 2))
 }
 
-# Invoke through the pattern when the element offers one, because a flyout can move between the
-# read and the click. The pointer is the fallback, and which one was used is printed.
+# HOW A CONTROL IS PRESSED HERE, AND WHY IT IS NOT THE MOUSE
+# On this runner injected input is dropped. Measured, not assumed (run 35491583919): the pointer
+# arrives at the exact coordinates asked for and over the right window, the thread is already on
+# the input desktop, and neither mouse_event nor absolute SendInput closes a plain Win32 dialog's
+# Cancel button. The same button, pressed through UI Automation's InvokePattern, closed it at once.
+#
+# So a press here is the accessibility API: InvokePattern, or LegacyIAccessible's default action
+# where a control offers only that. That is the same code path a screen reader user's press takes,
+# and it runs the control's own handler inside the board, which is the thing being proved. What it
+# does NOT prove is hit-testing: that the rectangle is reachable by a pointer, unobscured, and big
+# enough to hit. The screenshots are what stand behind that, and the README says so.
 function Press-Element($e) {
+  $name = try { $e.Current.Name } catch { "<unnamed>" }
   try {
-    $p = $e.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern)
-    $p.Invoke()
-    Write-Host "invoked '$($e.Current.Name)' through InvokePattern"
-    Start-Sleep -Milliseconds 900
+    $e.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
+    Write-Host "invoked '$name' through InvokePattern"
+    Start-Sleep -Milliseconds 1200
     return "InvokePattern"
-  } catch {
-    Click-Element $e
-    return "pointer"
-  }
+  } catch {}
+  try {
+    $e.GetCurrentPattern([System.Windows.Automation.LegacyIAccessiblePattern]::Pattern).DoDefaultAction()
+    Write-Host "invoked '$name' through LegacyIAccessible.DoDefaultAction"
+    Start-Sleep -Milliseconds 1200
+    return "DoDefaultAction"
+  } catch {}
+  try {
+    $e.GetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern).Select()
+    Write-Host "selected '$name' through SelectionItemPattern"
+    Start-Sleep -Milliseconds 1200
+    return "SelectionItemPattern"
+  } catch {}
+  throw "'$name' offers no pattern that can press it, and this session drops injected input"
 }
 
 $VK_LWIN = 0x5B; $VK_W = 0x57; $VK_ESCAPE = 0x1B; $VK_RETURN = 0x0D; $VK_TAB = 0x09
@@ -407,6 +426,21 @@ function Wait-BoardOpen([int] $Seconds = 20) {
     Start-Sleep 1
   }
   return $false
+}
+
+# The board caches the set of widget providers it knows about, and a provider registered after it
+# started is not in that cache. Ending the host makes the next activation build it again, which is
+# how a newly installed app's widgets get into the picker without a sign-out.
+#
+# It also works around the other thing this runner does: the board opens once per job. Once closed
+# it will not come back from shell:AppsFolder, so anything that needs it open again needs this
+# first.
+function Reset-WidgetsHost {
+  foreach ($name in "Widgets", "WidgetBoard", "WidgetService") {
+    $procs = @(Get-Process $name -ErrorAction SilentlyContinue)
+    if ($procs) { Write-Host "ending $($procs.Count) $name process(es)"; $procs | Stop-Process -Force -ErrorAction SilentlyContinue }
+  }
+  Start-Sleep 6
 }
 
 function Close-Board {
