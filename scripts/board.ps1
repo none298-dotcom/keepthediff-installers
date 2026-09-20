@@ -394,13 +394,20 @@ $VK_LWIN = 0x5B; $VK_W = 0x57; $VK_ESCAPE = 0x1B; $VK_RETURN = 0x0D; $VK_TAB = 0
 # Win+W is what a person presses, so it is tried first and it is the one the screenshots are of.
 # The board's own app entry is the fallback, and which route opened it is printed, because
 # "the board opened" and "the shortcut works" are two different claims.
-function Open-Board([int] $Tries = 4) {
+# Open it ONCE and leave it open. There is no way to close it from here (this session drops
+# injected input, so there is no Escape to press), and a host that has been ended does not come
+# back: run 35491820930 ended Widgets.exe first and then waited 100 seconds across four activations
+# for a board that never appeared.
+function Open-Board([int] $Tries = 3, [int] $Seconds = 60) {
   if (Test-BoardOpen) { return "already open" }
   $pkg = Get-AppxPackage -Name MicrosoftWindows.Client.WebExperience
-  for ($i = 1; $i -le $Tries; $i++) {
-    Start-Process "explorer.exe" "shell:AppsFolder\$($pkg.PackageFamilyName)!Widgets"
-    if (Wait-BoardOpen 25) { return "shell:AppsFolder (attempt $i)" }
-    Write-Host "attempt $i did not bring the board up"
+  foreach ($id in "Widgets", "Global.WidgetBoard") {
+    for ($i = 1; $i -le $Tries; $i++) {
+      Write-Host "activating $($pkg.PackageFamilyName)!$id (attempt $i)"
+      Start-Process "explorer.exe" "shell:AppsFolder\$($pkg.PackageFamilyName)!$id"
+      if (Wait-BoardOpen $Seconds) { return "shell:AppsFolder\...!$id (attempt $i)" }
+      Write-Host "  no board yet; running: $((Get-Process Widgets, WidgetService, WidgetBoard, msedgewebview2 -ErrorAction SilentlyContinue | ForEach-Object { $_.ProcessName }) -join ', ')"
+    }
   }
   return ""
 }

@@ -38,7 +38,7 @@ jobs:
           . ./scripts/board.ps1
           Start-Board $env:OUT
           [void](Clear-Intruders)
-          Reset-WidgetsHost
+          Write-Host "widget processes: $((Get-Process Widgets, WidgetService -ErrorAction SilentlyContinue | ForEach-Object { $_.ProcessName }) -join ', ')"
           $route = Open-Board
           "opened via '$route'"
           $board = Get-BoardWindow
