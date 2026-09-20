@@ -80,6 +80,13 @@ jobs:
           #
           # The seed is committed in the source repo rather than generated, because the Swift seeder
           # does not run here and the two platforms persist different JSON anyway.
+          # THE SEED IS REFRESHED HERE, NOT BY WHOEVER REMEMBERS. windows-state.json carries
+          # absolute dates, so it ages out of "this week" and Home screenshots as $0 with no
+          # countdown: a money app's store listing showing zero. `refresh_windows_seed.py` exists
+          # for exactly this and its docstring says to run it before dispatching, which is a step
+          # that gets skipped. It runs here instead, against the checked out source, so a capture
+          # cannot be taken from a stale seed again. It only shifts the rows; it invents nothing.
+          python tools/seed/refresh_windows_seed.py --apply
           $dir = Join-Path $env:LOCALAPPDATA 'KeepTheDiff'
           New-Item -ItemType Directory -Force -Path $dir | Out-Null
           Copy-Item 'tools/seed/windows-state.json' (Join-Path $dir 'state.json') -Force
@@ -238,7 +245,27 @@ jobs:
           # 1424x891 is comfortably above the Microsoft Store's 1366x768 floor, which is the only
           # dimension constraint that applies here.
           Add-Type -AssemblyName System.Drawing
-          # 'widget' is deliberately absent: it is a full desktop capture, with nothing to trim.
+          # The widget shot is cropped differently: it is a desktop capture, so it carries the
+          # runner's own desktop icons down the left, the "Test Mode / Windows Server" watermark at
+          # the bottom right and the taskbar. None of that belongs in a Store listing. The box keeps
+          # both app windows and nothing else.
+          $w = "$PWD\shots\widget.png"
+          if (Test-Path $w) {
+            $src = [System.Drawing.Image]::FromFile($w)
+            $box = New-Object System.Drawing.Rectangle 50, 0, ($src.Width - 50), 945
+            if ($box.Bottom -gt $src.Height -or $box.Right -gt $src.Width) {
+              $src.Dispose(); throw "widget.png is $($src.Width)x$($src.Height), too small for the crop box"
+            }
+            $dst = New-Object System.Drawing.Bitmap $box.Width, $box.Height
+            $g = [System.Drawing.Graphics]::FromImage($dst)
+            $g.DrawImage($src, (New-Object System.Drawing.Rectangle 0, 0, $box.Width, $box.Height), $box, [System.Drawing.GraphicsUnit]::Pixel)
+            $g.Dispose(); $src.Dispose()
+            $dst.Save($w, [System.Drawing.Imaging.ImageFormat]::Png)
+            Write-Host "cropped widget.png to $($box.Width)x$($box.Height)"
+            $dst.Dispose()
+          }
+
+          # 'widget' is deliberately absent from the loop below: it has its own box above.
           foreach ($n in @('home','goals','history')) {
             $path = "$PWD\shots\$n.png"
             $src = [System.Drawing.Image]::FromFile($path)
