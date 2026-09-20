@@ -92,6 +92,16 @@ jobs:
           Copy-Item 'tools/seed/windows-state.json' (Join-Path $dir 'state.json') -Force
           Write-Host "seeded $dir"
 
+          # WHERE THE WIDGET WINDOW SITS, for the capture only. It opens in the top right corner
+          # the first time, and the desktop capture has to be cropped below the app window's top
+          # edge, where the capture picks up a black strip of window shadow. With the widget at the
+          # very top it would be cropped in half, so it is placed lower here. This is the same
+          # preferences file a person writes by dragging the window; nothing in the app changes.
+          $prefs = Join-Path $dir 'preferences.properties'
+          "desktopWidgetX=1600" | Out-File -FilePath $prefs -Encoding ascii
+          "desktopWidgetY=90"   | Out-File -FilePath $prefs -Encoding ascii -Append
+          Write-Host "widget window placed at 1600,90 for the capture"
+
       # Build FIRST, as its own step, with its log on screen.
       #
       # The first attempt went straight to `run` with the output discarded by `Start-Process`, and
