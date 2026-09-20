@@ -348,8 +348,9 @@ function Save-Tree([string] $Name) {
   foreach ($w in [Board]::Tops($false)) {
     if (($w.Rect.Right - $w.Rect.Left) -lt 200) { continue }
     $who = try { (Get-Process -Id $w.Pid -ErrorAction Stop).ProcessName } catch { "gone" }
-    $out.Add(("  {0} {1} [{2}] '{3}' {4}x{5} visible={6}" -f $w.Handle, $who, $w.Class, $w.Title,
-      $w.Rect.Right - $w.Rect.Left, $w.Rect.Bottom - $w.Rect.Top, $w.Visible))
+    $wide = $w.Rect.Right - $w.Rect.Left
+    $high = $w.Rect.Bottom - $w.Rect.Top
+    $out.Add("  $($w.Handle) $who [$($w.Class)] '$($w.Title)' ${wide}x${high} visible=$($w.Visible)")
   }
   $out.Add("")
   $out.Add("=== UI Automation, from the board's content window ===")
