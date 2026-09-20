@@ -1,0 +1,46 @@
+# Is there a Windows 11 runner with a real Widgets Board?
+#
+# The widget provider has never been seen in the board itself, and the reason recorded in
+# android/desktop/windows-widget/README.md was "no CI runner has a Widgets Board (Windows Server has
+# none)". That was true of windows-latest and was never re-checked against the Windows 11 ARM runner
+# image, which is a CLIENT SKU. This probe answers the question with facts rather than an assumption:
+# what SKU the runner is, whether the board's own package (MicrosoftWindows.Client.WebExperience) is
+# installed, and whether the Widgets service and its shell entry point exist.
+name: Windows 11 board probe
+
+on:
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: windows-11-arm
+    timeout-minutes: 20
+    steps:
+      - name: What is this machine
+        shell: pwsh
+        run: |
+          $os = Get-CimInstance Win32_OperatingSystem
+          "Caption      : $($os.Caption)"
+          "Version      : $($os.Version)"
+          "BuildNumber  : $($os.BuildNumber)"
+          "SKU          : $($os.OperatingSystemSKU)"
+          "Architecture : $env:PROCESSOR_ARCHITECTURE"
+
+      - name: Is the Widgets Board here
+        shell: pwsh
+        run: |
+          $web = Get-AppxPackage -AllUsers *WebExperience* -ErrorAction SilentlyContinue
+          if ($web) { $web | Select-Object Name, PackageFullName, Status | Format-List }
+          else { "no WebExperience package: the board is NOT installed" }
+          $svc = Get-Service -Name "WidgetService" -ErrorAction SilentlyContinue
+          if ($svc) { "WidgetService: $($svc.Status)" } else { "no WidgetService" }
+          $widgets = Get-AppxPackage -AllUsers *Widgets* -ErrorAction SilentlyContinue
+          if ($widgets) { $widgets | Select-Object Name, PackageFullName | Format-List } else { "no *Widgets* packages" }
+          "explorer: $((Get-Process explorer -ErrorAction SilentlyContinue | Measure-Object).Count) process(es)"
+
+      - name: Can a session even draw
+        shell: pwsh
+        run: |
+          Add-Type -AssemblyName System.Windows.Forms
+          $b = [System.Windows.Forms.SystemInformation]::VirtualScreen
+          "virtual screen: $($b.Width) x $($b.Height)"
