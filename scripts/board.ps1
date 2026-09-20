@@ -117,6 +117,31 @@ public class Board {
 }
 "@
 
+# THE SHELL'S OWN WAY OF STARTING A PACKAGED APP, and not `explorer.exe shell:AppsFolder\...`.
+# That route spawns an explorer process which then exits, and the board, which dismisses itself the
+# moment it is not the active window, was seen closing under a second later. This is the interface
+# the taskbar button itself uses; it returns the process it started and steals no foreground.
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+[ComImport, Guid("2e941141-7f97-4756-ba1d-9decde894a3d"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+public interface IApplicationActivationManager {
+  int ActivateApplication([MarshalAs(UnmanagedType.LPWStr)] string appUserModelId, [MarshalAs(UnmanagedType.LPWStr)] string arguments, int options, out uint processId);
+  int ActivateForFile([MarshalAs(UnmanagedType.LPWStr)] string appUserModelId, IntPtr items, [MarshalAs(UnmanagedType.LPWStr)] string verb, out uint processId);
+  int ActivateForProtocol([MarshalAs(UnmanagedType.LPWStr)] string appUserModelId, IntPtr items, out uint processId);
+}
+[ComImport, Guid("45BA127D-10A8-46EA-8AB7-56EA9078943C")]
+public class ApplicationActivationManager { }
+public static class Activator2 {
+  public static string Activate(string aumid) {
+    var manager = (IApplicationActivationManager)(new ApplicationActivationManager());
+    uint pid;
+    int hr = manager.ActivateApplication(aumid, null, 0, out pid);
+    return hr == 0 ? "pid " + pid : string.Format("0x{0:X8}", hr);
+  }
+}
+"@
+
 $script:BoardOut = "board-proof"
 $script:BoardShot = 0
 
@@ -212,8 +237,9 @@ function Clear-Intruders {
   $closed = 0
   foreach ($w in [Board]::Tops()) {
     $name = try { (Get-Process -Id $w.Pid -ErrorAction Stop).ProcessName } catch { "<gone>" }
-    $isOobe = $w.Class -eq "Windows.UI.Core.CoreWindow" -and $name -in @("WWAHost", "CloudExperienceHostBroker", "SystemSettings", "UserOOBEBroker")
-    $isOobe = $isOobe -or $w.Title -eq "Microsoft account" -or $name -in @("WWAHost", "FirstLogonAnim", "OOBENetworkCaptivePortal")
+    # Never the widgets picker, which WWAHost also hosts.
+    if ($w.Title -like "*Widget*") { continue }
+    $isOobe = $w.Title -eq "Microsoft account" -or $name -in @("WWAHost", "FirstLogonAnim", "OOBENetworkCaptivePortal", "CloudExperienceHostBroker", "UserOOBEBroker")
     $isStray = $w.Title -in @("System Properties", "Windows Setup")
     if (-not ($isOobe -or $isStray)) { continue }
     Write-Host "in the way: [$($w.Class)] '$($w.Title)' from $name (pid $($w.Pid)) -- closing it"
@@ -403,9 +429,9 @@ function Open-Board([int] $Tries = 3, [int] $Seconds = 60) {
   $pkg = Get-AppxPackage -Name MicrosoftWindows.Client.WebExperience
   foreach ($id in "Widgets", "Global.WidgetBoard") {
     for ($i = 1; $i -le $Tries; $i++) {
-      Write-Host "activating $($pkg.PackageFamilyName)!$id (attempt $i)"
-      Start-Process "explorer.exe" "shell:AppsFolder\$($pkg.PackageFamilyName)!$id"
-      if (Wait-BoardOpen $Seconds) { return "shell:AppsFolder\...!$id (attempt $i)" }
+      $aumid = "$($pkg.PackageFamilyName)!$id"
+      Write-Host "activating $aumid (attempt $i): $([Activator2]::Activate($aumid))"
+      if (Wait-BoardOpen $Seconds) { return "ActivateApplication ...!$id (attempt $i)" }
       Write-Host "  no board yet; running: $((Get-Process Widgets, WidgetService, WidgetBoard, msedgewebview2 -ErrorAction SilentlyContinue | ForEach-Object { $_.ProcessName }) -join ', ')"
     }
   }

@@ -31,46 +31,39 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      - name: Does the picker have an entry point of its own
+      - name: How long does the board stay open, and what is in the picker
         shell: powershell
-        continue-on-error: true
         run: |
           $ErrorActionPreference = "Stop"
           . ./scripts/board.ps1
           Start-Board $env:OUT
           [void](Clear-Intruders)
-          $pkg = Get-AppxPackage -Name MicrosoftWindows.Client.WebExperience
-          Start-Process "explorer.exe" "shell:AppsFolder\$($pkg.PackageFamilyName)!Global.WidgetPicker"
-          Start-Sleep 12
-          [Board]::Windows() | Write-Host
-          foreach ($w in [Board]::Tops()) {
-            if (($w.Rect.Right - $w.Rect.Left) -lt 250 -or ($w.Rect.Bottom - $w.Rect.Top) -lt 250) { continue }
-            $name = try { (Get-Process -Id $w.Pid -ErrorAction Stop).ProcessName } catch { "gone" }
-            Save-WindowShot $w.Handle "direct-picker-$name" | Out-Null
-          }
-          Save-Tree "direct-picker" | Out-Null
 
-      - name: Open the board and the picker, photographing as fast as they appear
-        shell: powershell
-        run: |
-          $ErrorActionPreference = "Stop"
-          . ./scripts/board.ps1
-          Start-Board $env:OUT
-          $script:BoardShot = 20
-          [void](Clear-Intruders)
-          if (-not (Ensure-Board)) { throw "The board did not open" }
+          # The standalone Global.WidgetPicker window opens but is EMPTY (run 35492105520): a frame
+          # with one nameless pane and nothing in it. The picker only exists inside the board, so
+          # the board has to stay open long enough to use it. This measures whether it does.
+          for ($round = 1; $round -le 3; $round++) {
+            "=== round $round ==="
+            if (-not (Ensure-Board)) { "the board did not open at all"; continue }
+            $board = Get-BoardWindow
+            if ($board) { Save-WindowShot $board.Handle "round$round-at-once" | Out-Null }
+            foreach ($t in 2, 5, 10, 20, 40) {
+              Start-Sleep ($t - $(if ($t -eq 2) { 0 } else { 0 }))
+              $w = Get-BoardWindow
+              "  +$t s: the board is $(if ($w) { "open (handle $($w.Handle))" } else { 'GONE' })"
+              if (-not $w) { break }
+            }
+          }
+
+          if (-not (Ensure-Board)) { throw "The board would not stay open long enough to use" }
           $board = Get-BoardWindow
           Save-WindowShot $board.Handle "board" -Required | Out-Null
           Save-Tree "board" | Out-Null
-          "still open after the tree: $(Poke-Board)"
-
-          if (-not (Ensure-Board)) { throw "The board closed and would not come back" }
           $add = @(Find-Elements "Add widgets" | Where-Object { "$($_.Current.ControlType.ProgrammaticName)" -match 'Button' })[0]
           if (-not $add) { throw "No 'Add widgets' button" }
           "the add button: $(Show-Element $add)"
           "pressed through: $(Press-Element $add)"
-          Start-Sleep 5
-
+          Start-Sleep 4
           [Board]::Windows() | Write-Host
           foreach ($w in [Board]::Tops()) {
             if (($w.Rect.Right - $w.Rect.Left) -lt 250 -or ($w.Rect.Bottom - $w.Rect.Top) -lt 250) { continue }
