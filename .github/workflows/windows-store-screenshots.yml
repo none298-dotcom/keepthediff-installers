@@ -27,10 +27,46 @@ on:
         description: Branch or sha of the source repo to capture
         required: false
         default: main
+      langs:
+        description: "Store languages to capture, comma separated Play codes (e.g. de-DE,ja-JP), or all"
+        required: false
+        default: all
 
 jobs:
+  # Which languages this run captures, as a matrix for the job below. A job-level `if` cannot read
+  # the matrix, so the filter by the `langs` input happens here instead.
+  languages:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.pick.outputs.matrix }}
+    steps:
+      - id: pick
+        env:
+          WANTED: ${{ inputs.langs }}
+          ALL: '[{"code": "en-US", "jvm": "-Duser.language=en -Duser.country=US"}, {"code": "de-DE", "jvm": "-Duser.language=de -Duser.country=DE"}, {"code": "es-ES", "jvm": "-Duser.language=es -Duser.country=ES"}, {"code": "es-419", "jvm": "-Duser.language=es -Duser.country=MX"}, {"code": "fr-FR", "jvm": "-Duser.language=fr -Duser.country=FR"}, {"code": "it-IT", "jvm": "-Duser.language=it -Duser.country=IT"}, {"code": "ja-JP", "jvm": "-Duser.language=ja -Duser.country=JP"}, {"code": "ko-KR", "jvm": "-Duser.language=ko -Duser.country=KR"}, {"code": "pt-BR", "jvm": "-Duser.language=pt -Duser.country=BR"}, {"code": "zh-CN", "jvm": "-Duser.language=zh -Duser.country=CN -Duser.script=Hans"}, {"code": "zh-TW", "jvm": "-Duser.language=zh -Duser.country=TW -Duser.script=Hant"}, {"code": "nl-NL", "jvm": "-Duser.language=nl -Duser.country=NL"}, {"code": "tr-TR", "jvm": "-Duser.language=tr -Duser.country=TR"}, {"code": "pl-PL", "jvm": "-Duser.language=pl -Duser.country=PL"}, {"code": "sv-SE", "jvm": "-Duser.language=sv -Duser.country=SE"}, {"code": "id", "jvm": "-Duser.language=id -Duser.country=ID"}, {"code": "ar", "jvm": "-Duser.language=ar -Duser.country=SA"}, {"code": "hi-IN", "jvm": "-Duser.language=hi -Duser.country=IN"}, {"code": "iw-IL", "jvm": "-Duser.language=he -Duser.country=IL"}, {"code": "th", "jvm": "-Duser.language=th -Duser.country=TH"}, {"code": "vi", "jvm": "-Duser.language=vi -Duser.country=VN"}]'
+        run: |
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json, os
+          all_langs = json.loads(os.environ["ALL"])
+          wanted = os.environ.get("WANTED", "all").strip()
+          if wanted != "all":
+              keep = {w.strip() for w in wanted.split(",") if w.strip()}
+              all_langs = [l for l in all_langs if l["code"] in keep]
+          print("matrix=" + json.dumps({"include": all_langs}))
+          PY
+
   capture:
+    needs: languages
     runs-on: windows-latest
+    # ONE JOB PER LANGUAGE (2026-09-27, owner: store screenshots in all 21 languages). Each job runs
+    # the app in that language and region (the JVM's own locale, which the desktop app follows when
+    # no language is chosen in its Settings) on that language's seed: tools/seed/windows/<code>.json,
+    # built by tools/seed/build_windows_seeds.py with the same translations and currency-scaled
+    # amounts as every other store capture.
+    strategy:
+      fail-fast: false
+      max-parallel: 6
+      matrix: ${{ fromJSON(needs.languages.outputs.matrix) }}
     steps:
       - name: Check out the private source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -86,10 +122,11 @@ jobs:
           # for exactly this and its docstring says to run it before dispatching, which is a step
           # that gets skipped. It runs here instead, against the checked out source, so a capture
           # cannot be taken from a stale seed again. It only shifts the rows; it invents nothing.
-          python tools/seed/refresh_windows_seed.py --apply
+          $seed = "tools/seed/windows/${{ matrix.code }}.json"
+          python tools/seed/refresh_windows_seed.py --apply --file $seed
           $dir = Join-Path $env:LOCALAPPDATA 'KeepTheDiff'
           New-Item -ItemType Directory -Force -Path $dir | Out-Null
-          Copy-Item 'tools/seed/windows-state.json' (Join-Path $dir 'state.json') -Force
+          Copy-Item $seed (Join-Path $dir 'state.json') -Force
           Write-Host "seeded $dir"
 
           # WHERE THE WIDGET WINDOW SITS, for the capture only. It opens in the top right corner
@@ -123,6 +160,9 @@ jobs:
           # Read by the devTools source set only; in any build without -PdevTools=true the class
           # that reads this does not exist.
           KTD_PREMIUM_FOR_TESTING: 'true'
+          # The language and region the app starts in, read by every JVM on the runner (Gradle's
+          # too, which is harmless).
+          JAVA_TOOL_OPTIONS: ${{ matrix.jvm }}
         run: |
           $ErrorActionPreference = 'Stop'
           Add-Type -AssemblyName System.Drawing, System.Windows.Forms, UIAutomationClient
@@ -296,5 +336,5 @@ jobs:
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
-          name: windows-store-screenshots
+          name: windows-store-screenshots-${{ matrix.code }}
           path: shots/*
