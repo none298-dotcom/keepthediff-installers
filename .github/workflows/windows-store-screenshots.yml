@@ -137,6 +137,9 @@ jobs:
           $prefs = Join-Path $dir 'preferences.properties'
           "desktopWidgetX=1600" | Out-File -FilePath $prefs -Encoding ascii
           "desktopWidgetY=90"   | Out-File -FilePath $prefs -Encoding ascii -Append
+          # What's New opens once after an update and would cover every capture; a listing image
+          # shows the app, so the capture has it already seen.
+          "whatsNewDisabled=true" | Out-File -FilePath $prefs -Encoding ascii -Append
           Write-Host "widget window placed at 1600,90 for the capture"
 
       # Build FIRST, as its own step, with its log on screen.
