@@ -31,6 +31,14 @@ on:
         description: "Store languages to capture, comma separated Play codes (e.g. de-DE,ja-JP), or all"
         required: false
         default: all
+      screens:
+        description: "Screens to open with --screen=, comma separated. The store set is the default; a sweep passes every screen"
+        required: false
+        default: home,goals,history,widget
+      text_size:
+        description: "The app's own text size for the run (smaller, larger, largest); empty keeps the default"
+        required: false
+        default: ''
 
 jobs:
   # Which languages this run captures, as a matrix for the job below. A job-level `if` cannot read
@@ -110,6 +118,8 @@ jobs:
 
       - name: Seed a realistic ledger
         shell: pwsh
+        env:
+          TEXT_SIZE: ${{ inputs.text_size }}
         run: |
           # The app opens on whatever is in its own AppData folder, and an empty one screenshots as
           # the first-run empty state: honest, and useless for a store listing.
@@ -140,6 +150,8 @@ jobs:
           # What's New opens once after an update and would cover every capture; a listing image
           # shows the app, so the capture has it already seen.
           "whatsNewDisabled=true" | Out-File -FilePath $prefs -Encoding ascii -Append
+          # A sweep at the largest text size, when asked for; the store set leaves it alone.
+          if ($env:TEXT_SIZE) { "textSize=$env:TEXT_SIZE" | Out-File -FilePath $prefs -Encoding ascii -Append }
           Write-Host "widget window placed at 1600,90 for the capture"
 
       # Build FIRST, as its own step, with its log on screen.
@@ -166,11 +178,12 @@ jobs:
           # The language and region the app starts in, read by every JVM on the runner (Gradle's
           # too, which is harmless).
           JAVA_TOOL_OPTIONS: ${{ matrix.jvm }}
+          SCREENS: ${{ inputs.screens }}
         run: |
           $ErrorActionPreference = 'Stop'
           Add-Type -AssemblyName System.Drawing, System.Windows.Forms, UIAutomationClient
 
-          foreach ($screen in @('home', 'goals', 'history', 'widget')) {
+          foreach ($screen in ($env:SCREENS -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })) {
             Write-Host "=== $screen ==="
             # `gradlew run` blocks while the window is open, so it is started detached and killed
             # once the frame is grabbed.
