@@ -152,6 +152,7 @@ jobs:
           "whatsNewDisabled=true" | Out-File -FilePath $prefs -Encoding ascii -Append
           # A sweep at the largest text size, when asked for; the store set leaves it alone.
           if ($env:TEXT_SIZE) { "textSize=$env:TEXT_SIZE" | Out-File -FilePath $prefs -Encoding ascii -Append }
+          Write-Host "preferences for this capture:"; Get-Content $prefs | ForEach-Object { Write-Host "  $_" }
           Write-Host "widget window placed at 1600,90 for the capture"
 
       # Build FIRST, as its own step, with its log on screen.
