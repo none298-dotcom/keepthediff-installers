@@ -69,7 +69,15 @@ jobs:
         run: |
           set -euo pipefail
           version=$(grep -m1 'packageVersion = ' android/desktop/build.gradle.kts | sed 's/.*"\(.*\)".*/\1/')
+          # createDistributable names the folder and launcher after the shared packageName,
+          # "Keep the Diff". Linux wants no spaces, so the launcher, its .cfg (which jpackage
+          # finds by the launcher's own name) and the icon are renamed together.
+          built="android/desktop/build/compose/binaries/main/app/Keep the Diff"
           app=android/desktop/build/compose/binaries/main/app/keep-the-diff
+          rm -rf "$app" && cp -a "$built" "$app"
+          mv "$app/bin/Keep the Diff" "$app/bin/keep-the-diff"
+          mv "$app/lib/app/Keep the Diff.cfg" "$app/lib/app/keep-the-diff.cfg"
+          if [ -f "$app/lib/Keep the Diff.png" ]; then mv "$app/lib/Keep the Diff.png" "$app/lib/keep-the-diff.png"; fi
           test -x "$app/bin/keep-the-diff"
 
           mkdir -p dist
