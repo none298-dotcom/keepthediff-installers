@@ -108,7 +108,7 @@ jobs:
           cp tools/seed/windows/en-US.json "$XDG_DATA_HOME/KeepTheDiff/state.json"
           appimage="dist/KeepTheDiff-${{ steps.pack.outputs.version }}-x86_64.AppImage"
           chmod +x "$appimage"
-          for screen in home settings settings-bottom premium; do
+          for screen in walkthrough home settings settings-bottom premium; do
             xvfb-run -a -s "-screen 0 1600x1000x24" bash -c "
               APPIMAGE_EXTRACT_AND_RUN=1 '$appimage' --screen=$screen &
               pid=\$!
