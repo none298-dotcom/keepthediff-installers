@@ -125,3 +125,9 @@ jobs:
           path: |
             dist/
             shots/
+
+      # The photographs alone, small enough to look at without pulling the whole AppImage.
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: keepthediff-linux-shots
+          path: shots/
