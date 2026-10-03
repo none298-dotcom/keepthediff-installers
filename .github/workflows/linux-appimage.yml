@@ -1,0 +1,119 @@
+name: Build and verify Linux AppImage
+
+# Linux (owner, 2026-10-01): the same Compose Desktop app as the Mac and Windows downloads, packaged
+# two ways from one build:
+#   - KeepTheDiff-<version>-x86_64.AppImage, the website download, which updates itself in the app.
+#     The release Mac signs each AppImage's SHA-256 with an Ed25519 key kept on that Mac only, and the
+#     appcast carries the signature (android/desktop/.../update/LinuxUpdateInstaller.kt). Nothing is
+#     signed here, so this workflow needs no secret beyond the read-only source deploy key.
+#   - keep-the-diff-<version>-linux-x86_64.tar.gz, the plain app folder the Flathub manifest in
+#     linux/ downloads. Flathub builds the Flatpak; the app's source stays private.
+#
+# Built on Ubuntu 22.04 on purpose: an AppImage runs on systems at least as new as the one it was built
+# on, so the oldest supported runner reaches the most people.
+#
+# Then the AppImage is RUN, on a virtual screen, with a seeded ledger, and photographed. "It built" is
+# not "it works"; the Windows workflow beside this one records why.
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: "Branch or commit sha of keepthediff to build"
+        default: "main"
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-verify:
+    runs-on: ubuntu-22.04
+    env:
+      SOURCE_REF: ${{ inputs.source_ref }}
+      APPIMAGETOOL_URL: https://github.com/AppImage/appimagetool/releases/download/1.9.1/appimagetool-x86_64.AppImage
+      APPIMAGETOOL_SHA256: ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0
+    steps:
+      - name: Check out the private source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: none298-dotcom/keepthediff
+          ref: ${{ inputs.source_ref }}
+          ssh-key: ${{ secrets.SOURCE_DEPLOY_KEY }}
+
+      - name: Check out this repo's own files
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          path: ci
+
+      - name: Setup JDK 17
+        uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Tools for packing and for the virtual screen
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq xvfb imagemagick desktop-file-utils appstream
+          curl -sSL -o appimagetool "$APPIMAGETOOL_URL"
+          echo "$APPIMAGETOOL_SHA256  appimagetool" | sha256sum -c -
+          chmod +x appimagetool
+
+      - name: Build the app folder
+        working-directory: android
+        # `direct`: the website download, with the in-app updater (a Flathub copy never runs it).
+        run: ./gradlew :desktop:createDistributable -Pdistribution=direct --no-daemon
+
+      - name: Pack the AppImage and the Flathub tarball
+        id: pack
+        run: |
+          set -euo pipefail
+          version=$(grep -m1 'packageVersion = ' android/desktop/build.gradle.kts | sed 's/.*"\(.*\)".*/\1/')
+          app=android/desktop/build/compose/binaries/main/app/keep-the-diff
+          test -x "$app/bin/keep-the-diff"
+
+          mkdir -p dist
+          tar -C "$(dirname "$app")" -czf "dist/keep-the-diff-$version-linux-x86_64.tar.gz" keep-the-diff
+
+          appdir=KeepTheDiff.AppDir
+          mkdir -p "$appdir/usr"
+          cp -a "$app/." "$appdir/usr/"
+          cp ci/linux/AppRun "$appdir/AppRun"
+          chmod +x "$appdir/AppRun"
+          sed 's/^Icon=.*/Icon=keep-the-diff/; s/^Exec=.*/Exec=keep-the-diff/' ci/linux/com.keepthediff.KeepTheDiff.desktop > "$appdir/keep-the-diff.desktop"
+          desktop-file-validate "$appdir/keep-the-diff.desktop"
+          cp android/desktop/src/main/resources/icon-window.png "$appdir/keep-the-diff.png"
+          ARCH=x86_64 APPIMAGE_EXTRACT_AND_RUN=1 ./appimagetool --no-appstream "$appdir" "dist/KeepTheDiff-$version-x86_64.AppImage"
+          (cd dist && sha256sum * > SHA256SUMS && cat SHA256SUMS)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Check the Flathub listing file
+        run: appstreamcli validate --no-net ci/linux/com.keepthediff.KeepTheDiff.metainfo.xml
+
+      - name: Run it on a virtual screen and photograph it
+        run: |
+          set -euo pipefail
+          export HOME="$PWD/scratch-home" XDG_DATA_HOME="$PWD/scratch-home/.local/share"
+          mkdir -p "$XDG_DATA_HOME/KeepTheDiff" shots
+          # The English seed the Windows screenshots use, moved onto this week, so Home is not empty.
+          python3 tools/seed/refresh_windows_seed.py --apply --file tools/seed/windows/en-US.json
+          cp tools/seed/windows/en-US.json "$XDG_DATA_HOME/KeepTheDiff/state.json"
+          appimage="dist/KeepTheDiff-${{ steps.pack.outputs.version }}-x86_64.AppImage"
+          chmod +x "$appimage"
+          for screen in home settings settings-bottom premium; do
+            xvfb-run -a -s "-screen 0 1600x1000x24" bash -c "
+              APPIMAGE_EXTRACT_AND_RUN=1 '$appimage' --screen=$screen &
+              pid=\$!
+              sleep 25
+              kill -0 \$pid || { echo 'the app quit on $screen'; exit 1; }
+              import -window root shots/$screen.png
+              kill \$pid"
+          done
+          ls -l shots
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: keepthediff-linux-${{ steps.pack.outputs.version }}
+          path: |
+            dist/
+            shots/

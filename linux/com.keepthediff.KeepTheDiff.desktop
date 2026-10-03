@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Keep the Diff
+GenericName=No spend tracker
+Comment=Log the money you chose not to spend
+Exec=keep-the-diff
+Icon=com.keepthediff.KeepTheDiff
+Terminal=false
+Categories=Office;Finance;
+Keywords=no spend;savings;money;budget;goal;impulse;
+StartupWMClass=Keep the Diff

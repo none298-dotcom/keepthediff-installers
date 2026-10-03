@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>com.keepthediff.KeepTheDiff</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>LicenseRef-proprietary</project_license>
+  <name>Keep the Diff</name>
+  <summary>Log the money you chose not to spend</summary>
+  <developer id="com.littlebirdtrading">
+    <name>Little Bird Trading LLC</name>
+  </developer>
+  <description>
+    <p>Keep the Diff gives you credit for the things you decide not to buy. When you skip a purchase or spend less, enter what you were ready to spend and what you actually spent. The difference is your Diff, and it adds up by week, by month and toward a goal with a photo.</p>
+    <p>There is no budget to set and no bank account to connect. A week with nothing logged changes nothing, and the total never goes down.</p>
+    <ul>
+      <li>Log a Diff in seconds, free and with no limit</li>
+      <li>Goals with a photo of what you are saving for</li>
+      <li>Milestones and an honest yearly pace</li>
+      <li>A small desktop widget window</li>
+      <li>Premium adds full history, CSV export, categories, Recurring Diffs and sync with your phone</li>
+    </ul>
+  </description>
+  <launchable type="desktop-id">com.keepthediff.KeepTheDiff.desktop</launchable>
+  <url type="homepage">https://keepthediff.com</url>
+  <url type="help">https://keepthediff.com/support</url>
+  <url type="vcs-browser">https://github.com/none298-dotcom/keepthediff-installers</url>
+  <categories>
+    <category>Office</category>
+    <category>Finance</category>
+  </categories>
+  <content_rating type="oars-1.1"/>
+  <screenshots>
+    <screenshot type="default">
+      <caption>This week's total, and what you kept</caption>
+      <image>https://keepthediff.com/assets/shots/windows-home.png</image>
+    </screenshot>
+  </screenshots>
+  <releases>
+    <release version="1.2.7" date="2026-10-03"/>
+  </releases>
+</component>
