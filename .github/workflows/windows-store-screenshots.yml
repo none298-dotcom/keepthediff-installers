@@ -335,7 +335,11 @@ jobs:
           # 'widget' is deliberately absent from the loop below: it has its own box above.
           foreach ($n in @('home','goals','history')) {
             $path = "$PWD\shots\$n.png"
+            # A run that shot only some screens has nothing at this path, and a rerun on the same
+            # folder finds the image already at the crop size. Both are left as they are.
+            if (-not (Test-Path $path)) { continue }
             $src = [System.Drawing.Image]::FromFile($path)
+            if ($src.Width -eq 1424 -and $src.Height -eq 891) { $src.Dispose(); continue }
             $rect = New-Object System.Drawing.Rectangle 8, 1, 1424, 891
             if ($rect.Right -gt $src.Width -or $rect.Bottom -gt $src.Height) {
               $src.Dispose()
