@@ -131,3 +131,33 @@ jobs:
         with:
           name: keepthediff-linux-shots
           path: shots/
+
+  snap:
+    needs: build-and-verify
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: keepthediff-linux-1*
+          path: art
+          merge-multiple: true
+      - name: Lay out the snap project
+        run: |
+          set -euo pipefail
+          tarball=$(ls art/dist/keep-the-diff-*-linux-x86_64.tar.gz)
+          version=$(basename "$tarball" | sed 's/keep-the-diff-\(.*\)-linux-x86_64.tar.gz/\1/')
+          mkdir -p snapbuild/snap/gui
+          sed "s/^version: .*/version: \"$version\"/" linux/snap/snapcraft.yaml > snapbuild/snap/snapcraft.yaml
+          cp "$tarball" snapbuild/app.tar.gz
+          tar -xzf "$tarball" -O keep-the-diff/lib/keep-the-diff.png > snapbuild/snap/gui/keep-the-diff.png
+          sed 's|^Icon=.*|Icon=${SNAP}/meta/gui/keep-the-diff.png|; s|^Exec=.*|Exec=keep-the-diff|' linux/com.keepthediff.KeepTheDiff.desktop > snapbuild/snap/gui/keep-the-diff.desktop
+      - uses: snapcore/action-build@v1
+        id: snapcraft
+        with:
+          path: snapbuild
+      - run: ls -l ${{ steps.snapcraft.outputs.snap }}
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: keepthediff-snap
+          path: ${{ steps.snapcraft.outputs.snap }}

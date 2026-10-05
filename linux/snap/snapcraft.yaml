@@ -1,0 +1,29 @@
+name: keep-the-diff
+base: core22
+version: "VERSION"
+title: Keep the Diff
+summary: Get credit for the money you decide not to spend
+description: |
+  Keep the Diff gives you credit for money you decided not to spend.
+  Enter what you were ready to spend and what you actually spent. The difference is your Diff,
+  and it adds up week by week toward the things you are saving for.
+  No budget to follow and no bank connection. Everything you log stays on this computer.
+grade: stable
+confinement: strict
+license: Proprietary
+website: https://keepthediff.com
+contact: https://keepthediff.com/contact
+icon: snap/gui/keep-the-diff.png
+
+apps:
+  keep-the-diff:
+    command: keep-the-diff/bin/keep-the-diff
+    extensions: [gnome]
+    plugs: [network, home, opengl, desktop, desktop-legacy, x11, wayland]
+
+parts:
+  app:
+    plugin: dump
+    source: app.tar.gz
+    organize:
+      keep-the-diff: keep-the-diff
