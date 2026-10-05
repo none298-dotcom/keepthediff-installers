@@ -10,13 +10,13 @@
   </developer>
   <description>
     <p>Keep the Diff gives you credit for the things you decide not to buy. When you skip a purchase or spend less, enter what you were ready to spend and what you actually spent. The difference is your Diff, and it adds up by week, by month and toward a goal with a photo.</p>
-    <p>There is no budget to set and no bank account to connect. A week with nothing logged changes nothing, and the total never goes down.</p>
+    <p>There is no budget to set and no bank account to connect. A week with nothing logged changes nothing.</p>
     <ul>
       <li>Log a Diff in seconds, free and with no limit</li>
       <li>Goals with a photo of what you are saving for</li>
       <li>Milestones and an honest yearly pace</li>
       <li>A small desktop widget window</li>
-      <li>Premium adds full history, CSV export, categories, Recurring Diffs and sync with your phone</li>
+      <li>Premium adds full history, CSV export, categories, Recurring Diffs and sync across your devices</li>
     </ul>
   </description>
   <launchable type="desktop-id">com.keepthediff.KeepTheDiff.desktop</launchable>
@@ -27,13 +27,21 @@
     <category>Finance</category>
   </categories>
   <content_rating type="oars-1.1"/>
+  <branding>
+    <color type="primary" scheme_preference="light">#DCE5D3</color>
+    <color type="primary" scheme_preference="dark">#1F3A2A</color>
+  </branding>
   <screenshots>
     <screenshot type="default">
       <caption>This week's total, and what you kept</caption>
-      <image>https://keepthediff.com/assets/shots/windows-home.png</image>
+      <image>https://keepthediff.com/assets/shots/linux-home.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>Settings, with the Sunday recap and your currency</caption>
+      <image>https://keepthediff.com/assets/shots/linux-settings.png</image>
     </screenshot>
   </screenshots>
   <releases>
-    <release version="1.2.7" date="2026-10-03"/>
+    <release version="1.2.7" date="2026-10-04"/>
   </releases>
 </component>
