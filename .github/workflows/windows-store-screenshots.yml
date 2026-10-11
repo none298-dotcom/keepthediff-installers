@@ -179,6 +179,11 @@ jobs:
           Set-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced' -Name HideIcons -Value 1
           Stop-Process -Name explorer -Force -ErrorAction SilentlyContinue
           Start-Sleep -Seconds 6
+          # A restarted explorer can open a File Explorer window, which then sits behind the app in
+          # the whole-desktop widget shot. Close every shell window it opened.
+          (New-Object -ComObject Shell.Application).Windows() | ForEach-Object { $_.Quit() }
+          Get-Process explorer -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowTitle } | ForEach-Object { $_.CloseMainWindow() | Out-Null }
+          Start-Sleep -Seconds 2
 
       - name: Capture each screen
         shell: pwsh
