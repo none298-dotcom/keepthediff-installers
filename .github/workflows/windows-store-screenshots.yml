@@ -170,6 +170,16 @@ jobs:
         # flag on the run alone would silently do nothing.
         run: .\gradlew.bat :desktop:classes -PdevTools=true --console=plain --no-daemon
 
+      # The runner's desktop carries shortcut icons, and they showed at the edge of every capture
+      # (the window shot's invisible resize border and the whole-desktop widget shot). A store image
+      # is the app, so the icons are hidden before anything is captured.
+      - name: Hide desktop icons
+        shell: pwsh
+        run: |
+          Set-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced' -Name HideIcons -Value 1
+          Stop-Process -Name explorer -Force -ErrorAction SilentlyContinue
+          Start-Sleep -Seconds 6
+
       - name: Capture each screen
         shell: pwsh
         env:
