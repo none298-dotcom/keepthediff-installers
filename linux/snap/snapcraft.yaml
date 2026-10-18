@@ -1,13 +1,24 @@
 name: keep-the-diff
 base: core22
 version: "VERSION"
-title: Keep the Diff
-summary: Get credit for the money you decide not to spend
+title: "Keep the Diff: Save Money"
+summary: Save money by logging what you didn't buy. No budget, no bank.
 description: |
-  Keep the Diff gives you credit for money you decided not to spend.
-  Enter what you were ready to spend and what you actually spent. The difference is your Diff,
-  and it adds up week by week toward the things you are saving for.
-  No budget to follow and no bank connection. Everything you log stays on this computer.
+  Keep the Diff is a savings tracker built around one subtraction: what you were ready to spend,
+  minus what you actually spent. The difference is your Diff, and it adds up week by week toward
+  the things you are saving for.
+
+  Use it for a no spend challenge, a no buy year or a low buy month, or simply to see how much
+  your better decisions add up to. A slip never resets your total, and there is no streak to lose.
+
+  - Log a Diff in seconds: what you planned to spend and what you spent
+  - Running totals by week, by month and across the year
+  - Savings goals with a photo, including a 52 week savings challenge
+  - "Not sure yet": park a purchase and decide later
+  - No budget to follow, no bank connection, no account needed, no ads
+
+  Logging is free. Premium adds end-to-end encrypted sync across your devices, full history,
+  CSV export, categories, unlimited goals, widgets and App Lock.
 grade: stable
 confinement: strict
 license: Proprietary
