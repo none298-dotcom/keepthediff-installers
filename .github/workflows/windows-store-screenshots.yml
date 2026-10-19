@@ -137,6 +137,8 @@ jobs:
           $dir = Join-Path $env:LOCALAPPDATA 'KeepTheDiff'
           New-Item -ItemType Directory -Force -Path $dir | Out-Null
           Copy-Item $seed (Join-Path $dir 'state.json') -Force
+          # The first goal's photo, the same picture every other platform's Goals shot shows.
+          Copy-Item tools/seed/windows/GoalPhotos (Join-Path $dir 'GoalPhotos') -Recurse -Force
           Write-Host "seeded $dir"
 
           # WHERE THE WIDGET WINDOW SITS, for the capture only. It opens in the top right corner
