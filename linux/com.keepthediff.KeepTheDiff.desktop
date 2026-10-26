@@ -9,3 +9,20 @@ Terminal=false
 Categories=Office;Finance;
 Keywords=no spend;savings;money;budget;goal;impulse;
 StartupWMClass=Keep the Diff
+Actions=Log;Plan;Goals;Upgrade;
+
+[Desktop Action Log]
+Name=Log a Diff
+Exec=keep-the-diff --action=log
+
+[Desktop Action Plan]
+Name=Plan a spend
+Exec=keep-the-diff --action=plan
+
+[Desktop Action Goals]
+Name=Goals
+Exec=keep-the-diff --action=goals
+
+[Desktop Action Upgrade]
+Name=Upgrade to Plus
+Exec=keep-the-diff --action=upgrade

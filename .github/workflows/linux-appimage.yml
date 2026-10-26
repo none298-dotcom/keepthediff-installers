@@ -88,7 +88,7 @@ jobs:
           cp -a "$app/." "$appdir/usr/"
           cp ci/linux/AppRun "$appdir/AppRun"
           chmod +x "$appdir/AppRun"
-          sed 's/^Icon=.*/Icon=keep-the-diff/; s/^Exec=.*/Exec=keep-the-diff/' ci/linux/com.keepthediff.KeepTheDiff.desktop > "$appdir/keep-the-diff.desktop"
+          sed 's/^Icon=.*/Icon=keep-the-diff/; s/^Exec=[^ ]*$/Exec=keep-the-diff/' ci/linux/com.keepthediff.KeepTheDiff.desktop > "$appdir/keep-the-diff.desktop"
           desktop-file-validate "$appdir/keep-the-diff.desktop"
           cp android/desktop/src/main/resources/icon-window.png "$appdir/keep-the-diff.png"
           ARCH=x86_64 APPIMAGE_EXTRACT_AND_RUN=1 ./appimagetool --no-appstream "$appdir" "dist/KeepTheDiff-$version-x86_64.AppImage"
@@ -151,7 +151,7 @@ jobs:
           sed "s/^version: .*/version: \"$version\"/" linux/snap/snapcraft.yaml > snapbuild/snap/snapcraft.yaml
           cp "$tarball" snapbuild/app.tar.gz
           tar -xzf "$tarball" -O keep-the-diff/lib/keep-the-diff.png > snapbuild/snap/gui/keep-the-diff.png
-          sed 's|^Icon=.*|Icon=${SNAP}/meta/gui/keep-the-diff.png|; s|^Exec=.*|Exec=keep-the-diff|' linux/com.keepthediff.KeepTheDiff.desktop > snapbuild/snap/gui/keep-the-diff.desktop
+          sed 's|^Icon=.*|Icon=${SNAP}/meta/gui/keep-the-diff.png|; s|^Exec=[^ ]*$|Exec=keep-the-diff|' linux/com.keepthediff.KeepTheDiff.desktop > snapbuild/snap/gui/keep-the-diff.desktop
       - uses: snapcore/action-build@v1
         id: snapcraft
         with:
