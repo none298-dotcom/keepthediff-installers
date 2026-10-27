@@ -133,9 +133,10 @@ Start-Sleep -Milliseconds 700
 # The first run page (the Add a Diff receipt) keeps its primary button disabled until there is a Diff to
 # log: a tile and an amount. A disabled button is correctly dead, so the page is filled in first, the way
 # a person would, and the button is then looked for. Positions are fractions of the client area, read from
-# the page as drawn in a 1424x861 client (Coffee tile, Ready to spend field).
+# the page as drawn in a 1424x861 client (Coffee tile, then the Ready to spend field once the tile is picked).
 Click ($origin.X + [int]($cw * 0.393)) ($origin.Y + [int]($ch * 0.441))
-Click ($origin.X + [int]($cw * 0.614)) ($origin.Y + [int]($ch * 0.659))
+# Picking a tile adds a label line, which moves everything below it down by about 27px: the field is at 0.690.
+Click ($origin.X + [int]($cw * 0.614)) ($origin.Y + [int]($ch * 0.690))
 [System.Windows.Forms.SendKeys]::SendWait("20")
 Start-Sleep -Milliseconds 700
 [Win32]::SetCursorPos(2, 2) | Out-Null
