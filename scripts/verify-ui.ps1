@@ -123,6 +123,24 @@ if (($origin.Y + $ch) -gt $screen.Bottom -or ($origin.X + $cw) -gt $screen.Right
 }
 
 $rect = New-Object System.Drawing.Rectangle $origin.X, $origin.Y, $cw, $ch
+
+# The pointer is parked in the corner BEFORE the first grab. The runner leaves it mid screen, which on the
+# first run page is over a picture tile, and the tile's hover colour then differed between the first and
+# second grab: the negative control reported "something is repainting" when only the hover had gone.
+[Win32]::SetCursorPos(2, 2) | Out-Null
+Start-Sleep -Milliseconds 700
+
+# The first run page (the Add a Diff receipt) keeps its primary button disabled until there is a Diff to
+# log: a tile and an amount. A disabled button is correctly dead, so the page is filled in first, the way
+# a person would, and the button is then looked for. Positions are fractions of the client area, read from
+# the page as drawn in a 1424x861 client (Coffee tile, Ready to spend field).
+Click ($origin.X + [int]($cw * 0.393)) ($origin.Y + [int]($ch * 0.441))
+Click ($origin.X + [int]($cw * 0.614)) ($origin.Y + [int]($ch * 0.659))
+[System.Windows.Forms.SendKeys]::SendWait("20")
+Start-Sleep -Milliseconds 700
+[Win32]::SetCursorPos(2, 2) | Out-Null
+Start-Sleep -Milliseconds 700
+
 $before = Grab $rect
 $before.Save("$OutDir/01-before-click.png")
 
@@ -134,7 +152,8 @@ $before.Save("$OutDir/01-before-click.png")
 # coordinate guess would have clicked and called alive.
 $MIN_RUN = 100      # px wide; the real button is ~465 in an 1100 window
 $MIN_ROWS = 20      # px tall; borders and wallpaper slivers are 1 to 3
-$bg = $before.GetPixel([int]($cw * 0.5), [int]($ch * 0.45))
+# The page margin, not the middle: the middle of the first run page is a picture tile or a line of text.
+$bg = $before.GetPixel([int]($cw * 0.04), [int]($ch * 0.7))
 Write-Host "background sample: R$($bg.R) G$($bg.G) B$($bg.B)"
 
 function LongestRun($bmp, $y, $bg) {
