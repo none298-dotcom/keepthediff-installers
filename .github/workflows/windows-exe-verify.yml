@@ -590,6 +590,35 @@ jobs:
           Write-Host "::error::The installed app did not register its widget package within 120 s."
           exit 1
 
+      # The taskbar and Start menu right-click list. The app builds it in the background through
+      # PowerShell and COM, and writes jumplist.log only when that fails. Windows stores the result
+      # in a customDestinations-ms file, which carries the entry titles as UTF-16 text, so the titles
+      # can be read back without driving the shell.
+      - name: Assert the installed app built its jump list
+        shell: pwsh
+        run: |
+          $dir = "$env:APPDATA\Microsoft\Windows\Recent\CustomDestinations"
+          $want = @('Log a Diff', 'Plan a spend', 'Goals')
+          $deadline = (Get-Date).AddSeconds(120); $found = $null
+          while (-not $found -and (Get-Date) -lt $deadline) {
+            if (Test-Path $dir) {
+              foreach ($f in Get-ChildItem $dir -Filter '*.customDestinations-ms' -EA SilentlyContinue) {
+                $text = [System.Text.Encoding]::Unicode.GetString([System.IO.File]::ReadAllBytes($f.FullName))
+                $missing = @($want | Where-Object { $text -notlike "*$_*" })
+                if ($missing.Count -eq 0) { $found = $f; break }
+              }
+            }
+            if (-not $found) { Start-Sleep 3 }
+          }
+          $log = "$env:LOCALAPPDATA\KeepTheDiff\jumplist.log"
+          if (Test-Path $log) { Write-Host "jumplist.log:"; Get-Content $log | Write-Host }
+          if (-not $found) {
+            if (Test-Path $dir) { Get-ChildItem $dir | ForEach-Object { Write-Host "  $($_.Name) $($_.Length) bytes" } } else { Write-Host "no CustomDestinations folder" }
+            Write-Host "::error::No jump list file with $($want -join ', ') appeared within 120 s."
+            exit 1
+          }
+          Write-Host "jump list built: $($found.Name) holds $($want -join ', ')"
+
       # The build shipped with the stock Java placeholder in its title bar and in Alt+Tab, and
       # the owner has failed store submissions over exactly that before. It was caught by a
       # human looking at a screenshot. It is checked here now.
