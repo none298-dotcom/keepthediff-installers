@@ -613,7 +613,16 @@ jobs:
           $log = "$env:LOCALAPPDATA\KeepTheDiff\jumplist.log"
           if (Test-Path $log) { Write-Host "jumplist.log:"; Get-Content $log | Write-Host }
           if (-not $found) {
-            if (Test-Path $dir) { Get-ChildItem $dir | ForEach-Object { Write-Host "  $($_.Name) $($_.Length) bytes" } } else { Write-Host "no CustomDestinations folder" }
+            if (Test-Path $dir) {
+              foreach ($f in Get-ChildItem $dir) {
+                Write-Host "  $($f.Name) $($f.Length) bytes"
+                $t = [System.Text.Encoding]::Unicode.GetString([System.IO.File]::ReadAllBytes($f.FullName))
+                $runs = [regex]::Matches($t, '[\x20-\x7E]{4,}') | ForEach-Object { $_.Value } | Select-Object -First 25
+                Write-Host ("    strings: " + ($runs -join ' | '))
+              }
+            } else { Write-Host "no CustomDestinations folder" }
+            Write-Host "app data folder:"; Get-ChildItem "$env:LOCALAPPDATA\KeepTheDiff" -EA SilentlyContinue | ForEach-Object { Write-Host "  $($_.Name)" }
+            Get-ChildItem "$env:APPDATA\Microsoft\Windows\Start Menu\Programs" -Recurse -Filter '*Keep*' -EA SilentlyContinue | ForEach-Object { Write-Host "  start menu: $($_.FullName)" }
             Write-Host "::error::No jump list file with $($want -join ', ') appeared within 120 s."
             exit 1
           }
