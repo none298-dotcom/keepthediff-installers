@@ -596,6 +596,8 @@ jobs:
       # stored there as UTF-16 text, so they can be read back without driving the shell. The titles
       # are stored in a property store and are not searched.
       - name: Assert the installed app built its jump list
+        # Direct build only: the app leaves the jump list to the Store in the Store build (WindowsJumpList.kt).
+        if: ${{ inputs.distribution == 'direct' }}
         shell: pwsh
         run: |
           $dir = "$env:APPDATA\Microsoft\Windows\Recent\CustomDestinations"
