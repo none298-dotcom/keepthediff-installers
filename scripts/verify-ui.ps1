@@ -130,6 +130,32 @@ $rect = New-Object System.Drawing.Rectangle $origin.X, $origin.Y, $cw, $ch
 [Win32]::SetCursorPos(2, 2) | Out-Null
 Start-Sleep -Milliseconds 700
 
+# The first run now opens on the intro video (owner, 2026-11-11). This script starts after WAIT_SECONDS, so the
+# video has ended and its end screen is up: Replay, -5 and Get Started, the last one at the bottom centre.
+# Get Started is pressed the way a person would, and the screen must change a lot (the setup panel replaces
+# the video); a dead Get Started fails here. It is looked for by colour first (the accent green), so a build
+# that opens straight on the setup page, or a Linux build with no video, is left alone.
+$introBefore = Grab $rect
+$introBefore.Save("$OutDir/00-intro-video.png")
+$gs = $introBefore.GetPixel([int]($cw * 0.5), [int]($ch * 0.894))
+if ($gs.R -lt 60 -and $gs.G -ge 50 -and $gs.G -le 100 -and $gs.B -lt 80) {
+  Write-Host "intro video end screen is up (Get Started pixel R$($gs.R) G$($gs.G) B$($gs.B)): pressing Get Started"
+  Click ($origin.X + [int]($cw * 0.5)) ($origin.Y + [int]($ch * 0.894))
+  Start-Sleep -Milliseconds 1500
+  [Win32]::SetCursorPos(2, 2) | Out-Null
+  Start-Sleep -Milliseconds 700
+  $introAfter = Grab $rect
+  $introAfter.Save("$OutDir/00b-after-get-started.png")
+  $introDiff = DiffFraction $introBefore $introAfter
+  Write-Host ("Get Started click changed {0:P1} of the screen" -f $introDiff)
+  if ($introDiff -lt 0.05) {
+    Write-Host "::error::Get Started on the intro video did nothing: the screen is unchanged after a real mouse press on it. Compare 00-intro-video.png with 00b-after-get-started.png."
+    exit 1
+  }
+} else {
+  Write-Host "no intro video end screen found (Get Started pixel R$($gs.R) G$($gs.G) B$($gs.B)); carrying on with the first setup page"
+}
+
 # The first run page (the Add a Diff receipt) keeps its primary button disabled until there is a Diff to
 # log: a tile and an amount. A disabled button is correctly dead, so the page is filled in first, the way
 # a person would, and the button is then looked for. Positions are fractions of the client area, read from
