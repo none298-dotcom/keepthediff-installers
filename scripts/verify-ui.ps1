@@ -130,6 +130,10 @@ $rect = New-Object System.Drawing.Rectangle $origin.X, $origin.Y, $cw, $ch
 [Win32]::SetCursorPos(2, 2) | Out-Null
 Start-Sleep -Milliseconds 700
 
+# If the intro video was skipped, the app wrote down why (one line, no personal data). Show it in the log.
+$skipLog = Join-Path $env:LOCALAPPDATA "KeepTheDiff\intro-video-skipped.txt"
+if (Test-Path $skipLog) { Write-Host "INTRO VIDEO WAS SKIPPED, the app says:"; Get-Content $skipLog | ForEach-Object { Write-Host "  $_" } } else { Write-Host "intro video was not skipped (no skip file)" }
+
 # The first run now opens on the intro video (owner, 2026-11-11). This script starts after WAIT_SECONDS, so the
 # video has ended and its end screen is up: Replay, -5 and Get Started, the last one at the bottom centre.
 # Get Started is pressed the way a person would, and the screen must change a lot (the setup panel replaces
