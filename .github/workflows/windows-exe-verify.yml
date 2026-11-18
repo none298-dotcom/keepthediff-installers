@@ -396,6 +396,24 @@ jobs:
           }
           Write-Host "widget in the installed app: $($widget.FullName) ($((Get-ChildItem $widget.FullName -Recurse -File).Count) files)"
 
+      # The 1.4.0 browser sign-in crashed on a customer's Windows machine with
+      # NoClassDefFoundError: com/sun/net/httpserver/HttpServer, because the trimmed jpackage
+      # runtime had no jdk.httpserver module. `gradlew run` cannot see that (full JDK), and no
+      # check ever ran the PACKAGED app's runtime. This asks the INSTALLED runtime directly.
+      - name: Assert the installed runtime can run browser sign-in (jdk.httpserver)
+        shell: pwsh
+        run: |
+          $java = Get-ChildItem "$env:LOCALAPPDATA\Keep the Diff", "$env:ProgramFiles\Keep the Diff" -Recurse -Filter java.exe -ErrorAction SilentlyContinue |
+                  Where-Object { $_.FullName -match '\\runtime\\bin\\' } | Select-Object -First 1
+          if (-not $java) { throw "No runtime\bin\java.exe inside the installed app" }
+          Write-Host "installed runtime: $($java.FullName)"
+          $mods = & $java.FullName --list-modules
+          Write-Host ($mods -join "`n")
+          $need = @('jdk.httpserver', 'java.net.http', 'jdk.crypto.ec', 'java.naming', 'java.desktop')
+          $missing = $need | Where-Object { -not ($mods -match "^$([regex]::Escape($_))@") }
+          if ($missing) { throw "The installed runtime is missing: $($missing -join ', '). Browser sign-in would crash exactly as 1.4.0 did." }
+          Write-Host "installed runtime carries jdk.httpserver and the other modules sign-in needs"
+
       # perUserInstall = true was expected to break both certification checks
       # and broke only one: jpackage wrote the HKLM uninstall entry regardless,
       # so 10.2.7 went green in the run that was supposed to prove it bites.
