@@ -400,17 +400,21 @@ jobs:
       # NoClassDefFoundError: com/sun/net/httpserver/HttpServer, because the trimmed jpackage
       # runtime had no jdk.httpserver module. `gradlew run` cannot see that (full JDK), and no
       # check ever ran the PACKAGED app's runtime. This asks the INSTALLED runtime directly.
-      - name: Assert the installed runtime can run browser sign-in (jdk.httpserver)
+      - name: Assert the installed runtime carries what browser sign-in needs (jdk.httpserver)
         shell: pwsh
         run: |
-          $java = Get-ChildItem "$env:LOCALAPPDATA\Keep the Diff", "$env:ProgramFiles\Keep the Diff" -Recurse -Filter java.exe -ErrorAction SilentlyContinue |
-                  Where-Object { $_.FullName -match '\\runtime\\bin\\' } | Select-Object -First 1
-          if (-not $java) { throw "No runtime\bin\java.exe inside the installed app" }
-          Write-Host "installed runtime: $($java.FullName)"
-          $mods = & $java.FullName --list-modules
+          # jpackage's trimmed runtime ships no java.exe, so the module list is read from the
+          # runtime's own `release` file (the same list jlink built the image from).
+          $rel = Get-ChildItem "$env:LOCALAPPDATA\Keep the Diff", "$env:ProgramFiles\Keep the Diff" -Recurse -Filter release -File -ErrorAction SilentlyContinue |
+                 Where-Object { $_.FullName -match '\\runtime\\release$' } | Select-Object -First 1
+          if (-not $rel) { throw "No runtime\release file inside the installed app" }
+          Write-Host "installed runtime: $($rel.FullName)"
+          $line = Get-Content $rel.FullName | Where-Object { $_ -match '^MODULES=' } | Select-Object -First 1
+          if (-not $line) { throw "runtime\release has no MODULES= line" }
+          $mods = ($line -replace '^MODULES=', '').Trim('"') -split '\s+'
           Write-Host ($mods -join "`n")
           $need = @('jdk.httpserver', 'java.net.http', 'jdk.crypto.ec', 'java.naming', 'java.desktop')
-          $missing = $need | Where-Object { -not ($mods -match "^$([regex]::Escape($_))@") }
+          $missing = $need | Where-Object { $mods -notcontains $_ }
           if ($missing) { throw "The installed runtime is missing: $($missing -join ', '). Browser sign-in would crash exactly as 1.4.0 did." }
           Write-Host "installed runtime carries jdk.httpserver and the other modules sign-in needs"
 
