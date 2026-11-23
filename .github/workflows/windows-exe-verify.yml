@@ -682,6 +682,8 @@ jobs:
             if (-not $found) { Start-Sleep 1 }
           }
           if (-not $found) {
+            $log = "$env:LOCALAPPDATA\KeepTheDiff\notify.log"
+            if (Test-Path $log) { Write-Host "--- notify.log ---"; Get-Content $log | Write-Host } else { Write-Host "no notify.log: the helper never reached its toast code" }
             $setting = [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier($aumid).Setting
             Write-Host "::error::No toast reached the Action Center history. Notifier setting: $setting. The helper returns quietly when notifications are off, so 'Enabled' is expected here."
             exit 1
