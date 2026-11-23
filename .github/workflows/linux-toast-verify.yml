@@ -16,7 +16,7 @@ jobs:
           dunst -conf dunstrc >/dev/null 2>&1 & sleep 2
           printf '#!/bin/sh\necho "$@" > opened.txt\n' > fakeapp; chmod +x fakeapp
           # the exact notify-send call the app's job script makes
-          ( ACTION=$(timeout 120 notify-send --app-name="Keep the Diff" --action=default=Open --wait 'Please share your feedback' "Anything too complicated about Keep the Diff? I'd love to hear your feedback. Cheers -Lee" 2>/dev/null)
+          ( ACTION=$(timeout 120 notify-send --app-name="Keep the Diff" --action=default=Open --wait 'Please share your feedback' "Anything too complicated about Keep the Diff? I'd love to hear your feedback. Cheers -Lee" 2>err.txt)
             echo "action=[$ACTION]" > action.txt
             [ "$ACTION" = default ] && ./fakeapp --open keepthediff://feedback ) &
           sleep 3
@@ -25,7 +25,7 @@ jobs:
           xdotool getmouselocation; xdotool mousemove 1100 90; sleep 1; xdotool click 1; sleep 1; xdotool click 1; sleep 3; dunstctl count displayed; dunstctl count history; ls
           sleep 3
           scrot shot-after.png
-          sleep 3; cat action.txt opened.txt || true
+          sleep 3; notify-send --version; ps aux | grep -c '[n]otify-send'; cat err.txt; cat action.txt opened.txt || true
           grep -q 'action=\[default\]' action.txt && grep -q 'keepthediff://feedback' opened.txt && echo TOAST_CLICK_OK
           SH
           dbus-run-session -- bash t.sh | tee out.txt
