@@ -12,7 +12,8 @@ jobs:
           cat > t.sh <<'SH'
           set -u
           Xvfb :99 -screen 0 1280x800x24 >/dev/null 2>&1 & export DISPLAY=:99; sleep 2
-          dunst >/dev/null 2>&1 & sleep 2
+          printf '[global]\n    mouse_left_click = do_action, close_current\n' > dunstrc
+          dunst -conf dunstrc >/dev/null 2>&1 & sleep 2
           printf '#!/bin/sh\necho "$@" > opened.txt\n' > fakeapp; chmod +x fakeapp
           # the exact notify-send call the app's job script makes
           ( ACTION=$(timeout 120 notify-send --app-name="Keep the Diff" --action=default=Open --wait 'Please share your feedback' "Anything too complicated about Keep the Diff? I'd love to hear your feedback. Cheers -Lee" 2>/dev/null)
@@ -21,7 +22,7 @@ jobs:
           sleep 3
           scrot shot-before.png
           echo "history:"; dunstctl count displayed; dunstctl history | grep -E '"summary"|"appname"' | head
-          xdotool mousemove 1100 60 click 1; sleep 1; xdotool mousemove 1100 60 click 1
+          xdotool mousemove 1100 60 click 1; sleep 3
           sleep 3
           scrot shot-after.png
           cat action.txt opened.txt
