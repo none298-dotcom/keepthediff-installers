@@ -234,6 +234,31 @@ jobs:
           timestamp-rfc3161: http://timestamp.acs.microsoft.com
           timestamp-digest: SHA256
 
+      # The feedback push helper (KtdNotify.exe) shows the Windows toast a scheduled task fires when the
+      # app is closed. Built and signed with the same identity as the installer, then staged beside the
+      # widget, for the direct AND the Store build. Source: android/desktop/windows-notify.
+      - name: Build the feedback push helper
+        shell: pwsh
+        run: ./android/desktop/windows-notify/build.ps1 -OutDir "$env:RUNNER_TEMP\notify-build"
+
+      - name: Sign the feedback push helper (Azure Trusted Signing)
+        if: ${{ env.AZURE_CLIENT_ID != '' }}
+        uses: azure/trusted-signing-action@1d365fec12862c4aa68fcac418143d73f0cea293 # v0
+        with:
+          azure-tenant-id: ${{ env.AZURE_TENANT_ID }}
+          azure-client-id: ${{ env.AZURE_CLIENT_ID }}
+          endpoint: https://eus.codesigning.azure.net/
+          trusted-signing-account-name: mlcsigning
+          certificate-profile-name: mlc-public-trust
+          files: ${{ runner.temp }}\notify-build\notify\KtdNotify.exe
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+
+      - name: Stage the feedback push helper into the app resources
+        shell: pwsh
+        run: ./android/desktop/windows-notify/build.ps1 -OutDir "$env:RUNNER_TEMP\notify-build" -Stage
+
       # The Azure session is not needed again until the installer is signed, so it does not sit
       # beside the Gradle build.
       - name: Stage the widget into the app resources
@@ -276,6 +301,15 @@ jobs:
             if (-not (Test-Path (Join-Path $widget $f))) { throw "The staged widget folder has no $f" }
           }
           Write-Host "staged widget: $((Get-ChildItem $widget -Recurse -File).Count) files"
+
+      - name: Assert the staged push helper is complete
+        shell: pwsh
+        run: |
+          $n = "android/desktop/resources/windows/notify"
+          foreach ($f in "KtdNotify.exe", "icon.png") {
+            if (-not (Test-Path (Join-Path $n $f))) { throw "The staged push helper folder has no $f" }
+          }
+          Write-Host "staged push helper: $((Get-ChildItem $n -Recurse -File).Count) files"
 
       # ── Authenticode signing ──────────────────────────────────────────────
       # Signed with a short-lived certificate Azure mints per run. Authentication is
