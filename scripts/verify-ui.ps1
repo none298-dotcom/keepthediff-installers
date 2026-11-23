@@ -237,10 +237,15 @@ $afterControl = Grab $rect
 $afterControl.Save("$OutDir/02-after-control-click.png")
 $controlDiff = DiffFraction $before $afterControl
 Write-Host ("control diff: {0:P3}" -f $controlDiff)
-if ($controlDiff -gt 0.002) {
-  Write-Host "::error::Clicking empty background changed the screen. Something is animating or repainting, so a pixel comparison cannot tell a live button from a dead one here. Not reporting a result from a measurement that cannot support it."
+# The Welcome page animates on purpose (icons orbit, numbers tick), so an empty-background click is allowed to
+# change a few percent of the screen. That change is the NOISE FLOOR, and the real click must beat it by a wide
+# margin (below). If the screen changes more than a quarter on its own, the measurement really cannot be trusted.
+$noiseFloor = $controlDiff
+if ($noiseFloor -gt 0.25) {
+  Write-Host "::error::Clicking empty background changed more than a quarter of the screen. Something is repainting wildly, so a pixel comparison cannot tell a live button from a dead one here. Not reporting a result from a measurement that cannot support it."
   exit 1
 }
+if ($noiseFloor -gt 0.002) { Write-Host ("the screen animates on its own ({0:P1} between two grabs); the real click must change much more than that" -f $noiseFloor) }
 
 # ── The real click ───────────────────────────────────────────────────────────
 Click $btnX $btnY
@@ -255,8 +260,9 @@ $withButton = DiffFraction $afterControl $after
 Write-Host ("primary click diff, excluding the button's own rows: {0:P3}" -f $diff)
 Write-Host ("  for reference, including them: {0:P3}" -f $withButton)
 
-if ($diff -lt 0.01) {
-  Write-Host "::error::The primary button did nothing. Outside the button itself, the screen is unchanged after a real mouse press on it, so nothing was navigated to and no state changed. Compare 02-after-control-click.png with 03-after-primary-click.png."
+$needed = [Math]::Max(0.01, ($noiseFloor * 2) + 0.05)
+if ($diff -lt $needed) {
+  Write-Host ("::error::The primary button did nothing (needed more than {0:P1} of the screen to change). Outside the button itself, the screen is unchanged after a real mouse press on it, so nothing was navigated to and no state changed. Compare 02-after-control-click.png with 03-after-primary-click.png." -f $needed)
   exit 1
 }
 Write-Host "The primary button is live: a real click changed the screen beyond the button itself."
