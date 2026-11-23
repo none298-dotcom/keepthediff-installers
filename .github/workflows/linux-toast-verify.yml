@@ -22,10 +22,10 @@ jobs:
           sleep 3
           scrot shot-before.png
           echo "history:"; dunstctl count displayed; dunstctl history | grep -E '"summary"|"appname"' | head
-          xdotool mousemove 1100 60 click 1; sleep 3
+          xdotool getmouselocation; xdotool mousemove 1100 90; sleep 1; xdotool click 1; sleep 1; xdotool click 1; sleep 3; dunstctl count displayed; dunstctl count history; ls
           sleep 3
           scrot shot-after.png
-          cat action.txt opened.txt
+          sleep 3; cat action.txt opened.txt || true
           grep -q 'action=\[default\]' action.txt && grep -q 'keepthediff://feedback' opened.txt && echo TOAST_CLICK_OK
           SH
           dbus-run-session -- bash t.sh | tee out.txt
