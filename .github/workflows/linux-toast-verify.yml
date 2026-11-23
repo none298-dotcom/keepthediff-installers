@@ -5,7 +5,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Tools
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq dunst libnotify-bin xvfb dbus-x11 scrot imagemagick
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq dunst libnotify-bin xvfb dbus-x11 scrot imagemagick xdotool
       - name: Post the notification, check it is on screen, click it
         shell: bash
         run: |
@@ -21,7 +21,7 @@ jobs:
           sleep 3
           scrot shot-before.png
           echo "history:"; dunstctl count displayed; dunstctl history | grep -E '"summary"|"appname"' | head
-          dunstctl action 0 || true
+          xdotool mousemove 1100 60 click 1; sleep 1; xdotool mousemove 1100 60 click 1
           sleep 3
           scrot shot-after.png
           cat action.txt opened.txt
