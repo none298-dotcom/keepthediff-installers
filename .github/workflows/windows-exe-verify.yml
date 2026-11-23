@@ -646,6 +646,64 @@ jobs:
           Write-Host "::error::The installed app did not register its widget package within 120 s."
           exit 1
 
+      # The feedback push, end to end as far as a runner can see it. The helper that ships INSIDE the installed
+      # app is run the way the scheduled job runs it, and the toast it posts is read back from the Action
+      # Center history (so Focus assist hiding the banner cannot hide it from this check). The toast must
+      # carry the keepthediff://feedback launch URL, and that URL must reach the installed app through the
+      # per-user protocol handler (registered here with the same three reg commands WindowsTaskScheduler.kt
+      # runs, which its unit tests pin). What this cannot do is click the banner with a mouse.
+      - name: Prove the feedback push helper shows a toast and its link opens the app
+        shell: powershell
+        run: |
+          $app = "${{ steps.launch.outputs.exe }}"
+          $dir = Split-Path $app -Parent
+          $helper = Get-ChildItem $dir -Recurse -Filter KtdNotify.exe -EA SilentlyContinue | Select-Object -First 1
+          if (-not $helper) { Write-Host "::error::KtdNotify.exe is not inside the installed app ($dir). The push would never show."; exit 1 }
+          if (-not (Test-Path (Join-Path $helper.DirectoryName "icon.png"))) { Write-Host "::error::icon.png is missing beside KtdNotify.exe"; exit 1 }
+          $sig = Get-AuthenticodeSignature $helper.FullName
+          Write-Host "helper: $($helper.FullName), signature: $($sig.Status) ($($sig.SignerCertificate.Subject))"
+          if ("${{ env.AZURE_CLIENT_ID }}" -ne "" -and $sig.Status -ne 'Valid') { Write-Host "::error::KtdNotify.exe is not validly signed."; exit 1 }
+
+          $url = "keepthediff://feedback"
+          $fire = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+          $p = Start-Process -FilePath $helper.FullName -PassThru -Wait -ArgumentList @(
+            "--post", "--fire-ms", "$fire", "--task", "ktd-ci-none",
+            "--title", "Please share your feedback",
+            "--body", "Anything too complicated about Keep the Diff? I'd love to hear your feedback. Cheers -Lee",
+            "--url", $url, "--app", $app)
+          Write-Host "helper exited with $($p.ExitCode)"
+
+          [void][Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime]
+          $aumid = "LittleBirdTradingLLC.KeepTheDiff"
+          $found = $null
+          for ($i = 0; $i -lt 10 -and -not $found; $i++) {
+            $hist = [Windows.UI.Notifications.ToastNotificationManager]::History.GetHistory($aumid)
+            $found = $hist | Where-Object { $_.Content.GetXml() -match "Please share your feedback" } | Select-Object -First 1
+            if (-not $found) { Start-Sleep 1 }
+          }
+          if (-not $found) {
+            $setting = [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier($aumid).Setting
+            Write-Host "::error::No toast reached the Action Center history. Notifier setting: $setting. The helper returns quietly when notifications are off, so 'Enabled' is expected here."
+            exit 1
+          }
+          $xml = $found.Content.GetXml()
+          Write-Host $xml
+          if ($xml -notmatch 'activationType="protocol"' -or $xml -notmatch [regex]::Escape($url)) { Write-Host "::error::The toast does not carry the protocol launch URL."; exit 1 }
+          Write-Host "toast is in the Action Center with the feedback link"
+
+          $key = "HKCU\Software\Classes\keepthediff"
+          reg add $key /ve /d "URL:Keep the Diff" /f | Out-Null
+          reg add $key /v "URL Protocol" /d "" /f | Out-Null
+          reg add "$key\shell\open\command" /ve /d "`"$app`" --open `"%1`"" /f | Out-Null
+          Start-Process $url
+          $seen = $false
+          for ($i = 0; $i -lt 20 -and -not $seen; $i++) {
+            Start-Sleep 1
+            $seen = [bool](Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like "*--open*keepthediff://feedback*" })
+          }
+          if (-not $seen) { Write-Host "::error::Opening keepthediff://feedback did not start the installed app with --open."; exit 1 }
+          Write-Host "the link reached the installed app: --open keepthediff://feedback"
+
       # The taskbar and Start menu right-click list. The app builds it in the background through
       # PowerShell and COM, and writes jumplist.log only when that fails. Windows stores the result
       # in a customDestinations-ms file. Each entry's launch arguments (--action=log and so on) are
