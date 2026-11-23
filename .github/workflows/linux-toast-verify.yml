@@ -4,22 +4,28 @@ jobs:
   toast:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
       - name: Tools
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq libnotify-bin dbus-x11 python3-dbus python3-gi
-      - name: Send with the app's exact notify-send call and click the default action
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq libnotify-bin dbus-x11 xvfb xfce4-notifyd xdotool scrot
+      - name: Send with the app's exact notify-send call and click the banner
         shell: bash
         run: |
           cat > t.sh <<'SH'
-          python3 ci-fake-notifyd.py >server.log 2>&1 & sleep 2; gdbus call --session --dest org.freedesktop.Notifications --object-path /org/freedesktop/Notifications --method org.freedesktop.Notifications.GetCapabilities
+          Xvfb :99 -screen 0 1280x800x24 >/dev/null 2>&1 & export DISPLAY=:99; sleep 2
+          N=$(ls /usr/lib/*/xfce4/notifyd/xfce4-notifyd /usr/lib/xfce4/notifyd/xfce4-notifyd 2>/dev/null | head -1); echo "daemon=$N"
+          "$N" >d.log 2>&1 & sleep 3
           printf '#!/bin/sh\necho "$@" > opened.txt\n' > fakeapp; chmod +x fakeapp
-          # the exact call and follow-up in LinuxUserScheduler.scriptText
-          ACTION=$(timeout 60 notify-send --app-name="Keep the Diff" --action=default=Open --wait 'Please share your feedback' "Anything too complicated about Keep the Diff? I'd love to hear your feedback. Cheers -Lee" 2>err.txt)
-          cat err.txt; echo "action=[$ACTION]"
-          [ "$ACTION" = default ] && ./fakeapp --open keepthediff://feedback
-          cat server.log; cat received.json; echo; cat opened.txt
-          grep -q 'keepthediff://feedback' opened.txt && grep -q '"default"' received.json && echo TOAST_CLICK_OK
-          kill %1 2>/dev/null; true
+          ( ACTION=$(timeout 60 notify-send --app-name="Keep the Diff" --action=default=Open --wait 'Please share your feedback' "Anything too complicated about Keep the Diff? I'd love to hear your feedback. Cheers -Lee" 2>err.txt)
+            echo "action=[$ACTION]" > action.txt
+            [ "$ACTION" = default ] && ./fakeapp --open keepthediff://feedback ) &
+          sleep 3; scrot shot-before.png
+          for y in 30 50 70 90; do xdotool mousemove 1180 $y; sleep 0.3; done
+          xdotool click 1; sleep 4; scrot shot-after.png
+          cat err.txt d.log action.txt opened.txt
+          grep -q 'action=\[default\]' action.txt && grep -q 'keepthediff://feedback' opened.txt && echo TOAST_CLICK_OK
+          true
           SH
           dbus-run-session -- bash t.sh | tee out.txt
           grep TOAST_CLICK_OK out.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: linux-toast, path: "*.png" }
