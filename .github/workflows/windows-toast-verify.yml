@@ -68,40 +68,14 @@ jobs:
           New-Item -ItemType Directory -Force -Path $env:OUT | Out-Null
           Copy-Item "$env:RUNNER_TEMP\notify-build\notify\provenance.txt" $env:OUT -EA SilentlyContinue
 
-      - name: Post the toast and read it back from the Action Center
+      # Register the handler FIRST: the toast's link is activated by a real mouse click on the banner, and Windows
+      # hands it to whatever keepthediff:// is registered to. A stand-in for the app records what it is handed. The
+      # three reg commands are the ones WindowsTaskScheduler.registerProtocol runs, with the stand-in in place of the app.
+      - name: Post the toast, click the banner, and see the link arrive
         shell: powershell
         run: |
-          $helper = "$env:RUNNER_TEMP\notify-build\notify\KtdNotify.exe"
-          $url = "keepthediff://feedback"
-          $fire = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
-          $p = Start-Process -FilePath $helper -PassThru -Wait -ArgumentList @(
-            "--post", "--fire-ms", "$fire", "--task", "ktd-ci-none",
-            "--title", "Please share your feedback",
-            "--body", "Anything too complicated about Keep the Diff? I'd love to hear your feedback. Cheers -Lee",
-            "--url", $url, "--app", "unused")
-          Write-Host "helper exited with $($p.ExitCode)"
-          $log = "$env:LOCALAPPDATA\KeepTheDiff\notify.log"
-          if (Test-Path $log) { Write-Host "--- notify.log ---"; Get-Content $log | Write-Host; Copy-Item $log "$env:OUT\notify.log" }
-          [void][Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime]
-          $aumid = "LittleBirdTradingLLC.KeepTheDiff"
-          $found = $null
-          for ($i = 0; $i -lt 10 -and -not $found; $i++) {
-            $found = [Windows.UI.Notifications.ToastNotificationManager]::History.GetHistory($aumid) |
-                     Where-Object { $_.Content.GetXml() -match "Please share your feedback" } | Select-Object -First 1
-            if (-not $found) { Start-Sleep 1 }
-          }
-          if (-not $found) { Write-Host "::error::No toast reached the Action Center history. See notify.log above."; exit 1 }
-          $xml = $found.Content.GetXml()
-          $xml | Out-File "$env:OUT\toast.xml"
-          Write-Host $xml
-          if ($xml -notmatch 'activationType="protocol"' -or $xml -notmatch [regex]::Escape($url)) { Write-Host "::error::The toast does not carry the protocol launch URL."; exit 1 }
-          Write-Host "toast is in the Action Center with the feedback link"
-
-      - name: Route the toast's link through the per-user keepthediff:// handler
-        shell: powershell
-        run: |
-          # A stand-in for the app: records the arguments it is handed. The three reg commands are the ones
-          # WindowsTaskScheduler.registerProtocol runs, with the stand-in in place of the app.
+          Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+          Add-Type -Name Mouse -Namespace Ktd -MemberDefinition '[DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y); [DllImport("user32.dll")] public static extern void mouse_event(uint f, uint dx, uint dy, uint d, System.IntPtr e);'
           $rec = "$env:OUT\handler-args.txt"
           $stand = "$env:OUT\handler.cmd"
           Set-Content $stand "@echo %* > `"$rec`""
@@ -109,13 +83,49 @@ jobs:
           reg add $key /ve /d "URL:Keep the Diff" /f | Out-Null
           reg add $key /v "URL Protocol" /d "" /f | Out-Null
           reg add "$key\shell\open\command" /ve /d "`"$stand`" --open `"%1`"" /f | Out-Null
-          Start-Process "keepthediff://feedback"
+
+          $b = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+          function Grab { $bmp = New-Object System.Drawing.Bitmap $b.Width, $b.Height; [System.Drawing.Graphics]::FromImage($bmp).CopyFromScreen($b.Location, [System.Drawing.Point]::Empty, $b.Size); $bmp }
+          [Ktd.Mouse]::SetCursorPos(5, 5) | Out-Null
+          Start-Sleep 2
+          $before = Grab; $before.Save("$env:OUT\desktop-before.png")
+
+          $helper = "$env:RUNNER_TEMP\notify-build\notify\KtdNotify.exe"
+          $fire = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+          Start-Process -FilePath $helper -ArgumentList @(
+            "--post", "--fire-ms", "$fire", "--task", "ktd-ci-none",
+            "--title", "Please share your feedback",
+            "--body", "Anything too complicated about Keep the Diff? I'd love to hear your feedback. Cheers -Lee",
+            "--url", "keepthediff://feedback", "--app", "unused") | Out-Null
+          Start-Sleep -Milliseconds 1800
+          $after = Grab; $after.Save("$env:OUT\desktop-toast.png")
+          $log = "$env:LOCALAPPDATA\KeepTheDiff\notify.log"
+          if (Test-Path $log) { Write-Host "--- notify.log ---"; Get-Content $log | Write-Host; Copy-Item $log "$env:OUT\notify.log" }
+
+          # The toast lives in the bottom right corner. Find the pixels that changed there.
+          $minX = 99999; $minY = 99999; $maxX = -1; $maxY = -1; $n = 0
+          for ($y = [int]($b.Height * 0.55); $y -lt $b.Height - 48; $y += 2) {
+            for ($x = [int]($b.Width * 0.55); $x -lt $b.Width; $x += 2) {
+              $p = $before.GetPixel($x, $y); $q = $after.GetPixel($x, $y)
+              if ([Math]::Abs($p.R-$q.R) -gt 30 -or [Math]::Abs($p.G-$q.G) -gt 30 -or [Math]::Abs($p.B-$q.B) -gt 30) {
+                $n++; if ($x -lt $minX) { $minX = $x }; if ($x -gt $maxX) { $maxX = $x }; if ($y -lt $minY) { $minY = $y }; if ($y -gt $maxY) { $maxY = $y }
+              }
+            }
+          }
+          Write-Host "changed pixels in the corner: $n, box ($minX,$minY)-($maxX,$maxY)"
+          if ($n -lt 400 -or ($maxX - $minX) -lt 150 -or ($maxY - $minY) -lt 40) { Write-Host "::error::No toast banner appeared in the corner of the screen. See desktop-toast.png and notify.log."; exit 1 }
+          Write-Host "a toast banner is on screen"
+
+          $cx = [int](($minX + $maxX) / 2); $cy = [int](($minY + $maxY) / 2)
+          [Ktd.Mouse]::SetCursorPos($cx, $cy) | Out-Null; Start-Sleep -Milliseconds 300
+          [Ktd.Mouse]::mouse_event(0x0002, 0, 0, 0, [IntPtr]::Zero); Start-Sleep -Milliseconds 80; [Ktd.Mouse]::mouse_event(0x0004, 0, 0, 0, [IntPtr]::Zero)
           $seen = $false
           for ($i = 0; $i -lt 20 -and -not $seen; $i++) { Start-Sleep 1; $seen = Test-Path $rec }
-          if (-not $seen) { Write-Host "::error::Windows did not hand keepthediff://feedback to the registered handler."; exit 1 }
+          if (-not $seen) { Write-Host "::error::Clicking the banner did not hand keepthediff://feedback to the registered handler."; exit 1 }
           $got = (Get-Content $rec -Raw).Trim()
           Write-Host "handler was given: $got"
           if ($got -notmatch "--open" -or $got -notmatch "keepthediff://feedback") { Write-Host "::error::The handler was not given --open and the feedback link."; exit 1 }
+          Write-Host "clicking the banner opened keepthediff://feedback"
 
       - name: Screenshot the desktop
         if: always()
