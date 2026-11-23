@@ -160,14 +160,12 @@ if ($gs.R -lt 60 -and $gs.G -ge 50 -and $gs.G -le 100 -and $gs.B -lt 80) {
   Write-Host "no intro video end screen found (Get Started pixel R$($gs.R) G$($gs.G) B$($gs.B)); carrying on with the first setup page"
 }
 
-# The first run page (the Add a Diff receipt) keeps its primary button disabled until there is a Diff to
-# log: a tile and an amount. A disabled button is correctly dead, so the page is filled in first, the way
-# a person would, and the button is then looked for. Positions are fractions of the client area, read from
-# the page as drawn in a 1424x861 client (Coffee tile, then the Ready to spend field once the tile is picked).
-Click ($origin.X + [int]($cw * 0.393)) ($origin.Y + [int]($ch * 0.441))
-# Picking a tile adds a label line, which moves everything below it down by about 27px: the field is at 0.690.
-Click ($origin.X + [int]($cw * 0.614)) ($origin.Y + [int]($ch * 0.690))
-[System.Windows.Forms.SendKeys]::SendWait("20")
+# The first run page ("Save money by not spending") keeps its primary button grey until a first name is
+# typed: the name is mandatory (owner, 2026-11-17). A disabled button is correctly dead, so the name field is
+# filled in first, the way a person would, and the button is then looked for. The field is at the right of the
+# page, under the goal card: 0.746 across and 0.370 down of the client area, as drawn in a 1008x729 client.
+Click ($origin.X + [int]($cw * 0.746)) ($origin.Y + [int]($ch * 0.370))
+[System.Windows.Forms.SendKeys]::SendWait("Sam")
 Start-Sleep -Milliseconds 700
 [Win32]::SetCursorPos(2, 2) | Out-Null
 Start-Sleep -Milliseconds 700
