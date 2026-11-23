@@ -11,13 +11,13 @@ jobs:
         shell: bash
         run: |
           cat > t.sh <<'SH'
-          python3 ci-fake-notifyd.py >/dev/null 2>&1 & sleep 2
+          python3 ci-fake-notifyd.py >server.log 2>&1 & sleep 2; gdbus call --session --dest org.freedesktop.Notifications --object-path /org/freedesktop/Notifications --method org.freedesktop.Notifications.GetCapabilities
           printf '#!/bin/sh\necho "$@" > opened.txt\n' > fakeapp; chmod +x fakeapp
           # the exact call and follow-up in LinuxUserScheduler.scriptText
           ACTION=$(timeout 60 notify-send --app-name="Keep the Diff" --action=default=Open --wait 'Please share your feedback' "Anything too complicated about Keep the Diff? I'd love to hear your feedback. Cheers -Lee" 2>err.txt)
           cat err.txt; echo "action=[$ACTION]"
           [ "$ACTION" = default ] && ./fakeapp --open keepthediff://feedback
-          cat received.json; echo; cat opened.txt
+          cat server.log; cat received.json; echo; cat opened.txt
           grep -q 'keepthediff://feedback' opened.txt && grep -q '"default"' received.json && echo TOAST_CLICK_OK
           kill %1 2>/dev/null; true
           SH
