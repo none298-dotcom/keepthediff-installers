@@ -22,11 +22,12 @@ permissions:
   contents: read
 
 jobs:
-  verify:
-    runs-on: windows-11-arm
+  # The private source cannot be checked out over ssh on the ARM runner, so the helper is built where it can be
+  # (a stock runner) and handed over as an artifact. It is an x64 program; Windows 11 on ARM runs it emulated.
+  build:
+    runs-on: windows-latest
     env:
       SOURCE_REF: ${{ inputs.source_ref || 'main' }}
-      OUT: ${{ github.workspace }}\toast-proof
     steps:
       - name: Check out the private source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -42,9 +43,30 @@ jobs:
       - name: Build the push helper
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force -Path $env:OUT | Out-Null
           ./android/desktop/windows-notify/build.ps1 -OutDir "$env:RUNNER_TEMP\notify-build"
-          "keepthediff @ $(git rev-parse HEAD)" | Out-File "$env:OUT\provenance.txt"
+          "keepthediff @ $(git rev-parse HEAD)" | Out-File "$env:RUNNER_TEMP\notify-build\notify\provenance.txt"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: notify-helper
+          path: ${{ runner.temp }}\notify-build\notify
+
+  verify:
+    needs: build
+    runs-on: windows-11-arm
+    env:
+      OUT: ${{ github.workspace }}\toast-proof
+    steps:
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: notify-helper
+          path: ${{ runner.temp }}\notify-build\notify
+
+      - name: Make the proof folder
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path $env:OUT | Out-Null
+          Copy-Item "$env:RUNNER_TEMP\notify-build\notify\provenance.txt" $env:OUT -EA SilentlyContinue
 
       - name: Post the toast and read it back from the Action Center
         shell: powershell
